@@ -3,7 +3,7 @@ import os
 # Path to Google service account credentials JSON
 CREDENTIALS_PATH = os.environ.get(
     "GOOGLE_CREDENTIALS_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "baby-tracker-491801-5158858c7b8a.json"),
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "google-service-account-creds.json"),
 )
 
 # Legacy fallback calendar used by the original single-tenant app.

@@ -6,6 +6,7 @@ backend/__pycache__/
 backend/*.py[cod]
 backend/.pytest_cache/
 backend/.mypy_cache/
+*.pyc
 
 # Local database
 backend/database.db
@@ -20,6 +21,9 @@ frontend/.vite/
 .env
 .env.*
 !.env.example
+
+# Creds
+google-service-account-creds.json
 
 # Logs
 *.log
