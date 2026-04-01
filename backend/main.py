@@ -1,5 +1,7 @@
 import hashlib
 import logging
+import os
+from pathlib import Path
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
@@ -8,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlmodel import Field, SQLModel, Session, create_engine, select
@@ -18,13 +21,39 @@ from calendar_service import (
     infer_activity_type_from_summary,
     normalize_activity_type,
 )
-from config import CALENDAR_ID, CREDENTIALS_PATH, SESSION_TTL_DAYS
+from config import (
+    APP_HOST,
+    APP_PORT,
+    CALENDAR_ID,
+    CORS_ALLOWED_ORIGINS,
+    CREDENTIALS_PATH,
+    DATABASE_URL,
+    FRONTEND_DIST_PATH,
+    SESSION_TTL_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
-DATABASE_URL = "sqlite:///./database.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+def _prepare_database() -> None:
+    if not DATABASE_URL.startswith("sqlite:///"):
+        return
+
+    database_path = DATABASE_URL.removeprefix("sqlite:///")
+    if not database_path or database_path == ":memory:":
+        return
+
+    Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+
+def _connect_args() -> dict[str, bool]:
+    if DATABASE_URL.startswith("sqlite"):
+        return {"check_same_thread": False}
+    return {}
+
+
+_prepare_database()
+engine = create_engine(DATABASE_URL, connect_args=_connect_args())
 
 
 class Account(SQLModel, table=True):
@@ -184,7 +213,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3005"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -647,14 +676,46 @@ def _update_event_sync_metadata_from_google(event: Event, google_event: dict) ->
     return event
 
 
+def _frontend_dist_dir() -> Optional[Path]:
+    configured_dist_path = os.environ.get("FRONTEND_DIST_PATH", FRONTEND_DIST_PATH or "")
+    if not configured_dist_path:
+        return None
+
+    dist_dir = Path(configured_dist_path).expanduser().resolve()
+    if dist_dir.is_dir():
+        return dist_dir
+    return None
+
+
+def _frontend_file_response(relative_path: str) -> Optional[FileResponse]:
+    dist_dir = _frontend_dist_dir()
+    if dist_dir is None:
+        return None
+
+    candidate = (dist_dir / relative_path).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found") from exc
+
+    if candidate.is_file():
+        return FileResponse(candidate)
+    return None
+
+
 SQLModel.metadata.create_all(engine)
 _ensure_account_columns()
 _ensure_event_columns()
 
 
+@app.get("/health")
+def read_health():
+    return {"message": "Baby Tracker API is running"}
+
+
 @app.get("/")
 def read_root():
-    return {"message": "Baby Tracker API is running"}
+    return _frontend_file_response("index.html") or {"message": "Baby Tracker API is running"}
 
 
 @app.post("/auth/register", response_model=AuthResponse)
@@ -1006,7 +1067,20 @@ def finalize_event_endpoint(event_id: int, event_finalize: EventFinalize, sessio
         return _event_response(event)
 
 
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    file_response = _frontend_file_response(full_path)
+    if file_response is not None:
+        return file_response
+
+    index_response = _frontend_file_response("index.html")
+    if index_response is not None:
+        return index_response
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8090)
+    uvicorn.run(app, host=APP_HOST, port=APP_PORT)

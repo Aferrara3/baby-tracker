@@ -29,6 +29,7 @@ python main.py
 ```
 
 The API runs on `http://localhost:8090`.
+Local development uses `backend/database-dev.db`.
 
 ### Frontend
 
@@ -39,6 +40,21 @@ npm run dev
 ```
 
 The frontend runs on `http://localhost:3005`.
+
+## Deployment notes
+
+- Preferred deployment shape is a single origin that serves the built frontend and the FastAPI API together.
+- Local development remains unchanged with `make dev`.
+- Database split:
+  - local dev: `backend/database-dev.db`
+  - deployed container: `backend/database-prd.db`
+- Production runtime is configured with environment variables:
+  - `APP_HOST` / `APP_PORT`
+  - `DB_PATH` or `DATABASE_URL`
+  - `CORS_ALLOWED_ORIGINS`
+  - `GOOGLE_CREDENTIALS_PATH`
+  - `FRONTEND_DIST_PATH`
+- For container deployment, the production DB file is mounted in-place at `backend/database-prd.db`, and the Google credentials file is mounted read-only instead of baking it into the image.
 
 ## Tests
 

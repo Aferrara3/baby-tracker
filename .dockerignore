@@ -1,0 +1,9 @@
+.git
+.gitignore
+backend/__pycache__/
+backend/.pytest_cache/
+backend/venv/
+backend/database.db
+frontend/node_modules/
+frontend/dist/
+google-service-account-creds.json

@@ -597,3 +597,33 @@ def test_google_sync_reassigns_type_when_title_matches_known_activity(client: Te
 def test_unauthenticated_requests_are_rejected(client: TestClient):
     response = client.get("/events")
     assert response.status_code == 401
+
+
+def test_root_returns_status_without_frontend_dist(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("FRONTEND_DIST_PATH", raising=False)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "Baby Tracker API is running"}
+
+
+def test_root_serves_frontend_when_dist_is_configured(client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<html><body>baby tracker</body></html>", encoding="utf-8")
+    assets_dir = dist_dir / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "app.js").write_text("console.log('baby');", encoding="utf-8")
+    monkeypatch.setenv("FRONTEND_DIST_PATH", str(dist_dir))
+
+    root_response = client.get("/")
+    asset_response = client.get("/assets/app.js")
+    spa_response = client.get("/settings")
+
+    assert root_response.status_code == 200
+    assert "baby tracker" in root_response.text
+    assert asset_response.status_code == 200
+    assert "console.log('baby');" in asset_response.text
+    assert spa_response.status_code == 200
+    assert "baby tracker" in spa_response.text

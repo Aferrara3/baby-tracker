@@ -10,7 +10,7 @@ install:
 # Run both services concurrently
 dev:
 	npx --yes concurrently --kill-others --names "BACKEND,FRONTEND" --prefix-colors "blue,green" \
-		"cd backend && ./venv/bin/python main.py" \
+		"cd backend && DB_PATH=database-dev.db ./venv/bin/python main.py" \
 		"cd frontend && npm run dev"
 
 # Clean up build artifacts and dependencies
