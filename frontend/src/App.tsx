@@ -22,6 +22,8 @@ import Toast from './components/Toast';
 import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
+const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
+const NOTE_SHEET_AUTO_DISMISS_MS = 8000;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 interface Activity {
@@ -95,20 +97,22 @@ export default function App() {
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
 
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
   );
+  const pendingActivityLabel = ACTIVITIES.find((activity) => activity.id === pendingLog?.activityId)?.label ?? 'event';
 
-  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now().toString();
     setToasts((prev) => [...prev, { id, message, type }]);
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3000);
-  };
+  }, []);
 
   const persistAuth = (nextToken: string, nextAccount: Account) => {
     localStorage.setItem(TOKEN_STORAGE_KEY, nextToken);
@@ -128,6 +132,11 @@ export default function App() {
     setPendingLog(null);
     setInputValue('');
   };
+
+  const hideInteractionTip = useCallback(() => {
+    localStorage.setItem(INTERACTION_TIP_STORAGE_KEY, 'true');
+    setShowInteractionTip(false);
+  }, []);
 
   useEffect(() => {
     const fetchAccount = async () => {
@@ -153,7 +162,7 @@ export default function App() {
     void fetchAccount();
   }, [authHeaders, token]);
 
-  const finalizePendingEvent = async (details?: string) => {
+  const finalizePendingEvent = useCallback(async (details?: string) => {
     if (!pendingLog || !authHeaders) {
       return;
     }
@@ -163,13 +172,13 @@ export default function App() {
       details !== undefined ? { details } : {},
       { headers: authHeaders },
     );
-  };
+  }, [authHeaders, pendingLog]);
 
-  const resetPendingInput = () => {
+  const resetPendingInput = useCallback(() => {
     setShowInput(false);
     setPendingLog(null);
     setInputValue('');
-  };
+  }, []);
 
   const handleAuthSubmit = async () => {
     if (!username.trim() || !password.trim()) {
@@ -329,7 +338,7 @@ export default function App() {
     } finally {
       autoSyncInFlightRef.current = false;
     }
-  }, [authHeaders, refreshAccount]);
+  }, [addToast, authHeaders, refreshAccount]);
 
   const handleForceSyncFromGoogle = async () => {
     setIsBusy(true);
@@ -417,6 +426,7 @@ export default function App() {
           { type: activityId },
           { headers: authHeaders },
         );
+        hideInteractionTip();
         addToast(`Stopped (${formatDuration(response.data.duration_seconds)})`, 'success');
         setRunningActivity(null);
         setPendingLog({ eventId: response.data.event_id, activityId });
@@ -430,6 +440,7 @@ export default function App() {
 
     try {
       await axios.post(`${API_BASE}/activities/start`, { type: activityId }, { headers: authHeaders });
+      hideInteractionTip();
       setRunningActivity({ id: activityId, startTime: Date.now() });
     } catch (error) {
       addToast('Failed to start activity', 'error');
@@ -437,7 +448,7 @@ export default function App() {
     }
   };
 
-  const handleInputSubmit = async () => {
+  const handleInputSubmit = useCallback(async () => {
     try {
       await finalizePendingEvent(inputValue.trim() || undefined);
       if (inputValue.trim()) {
@@ -452,9 +463,9 @@ export default function App() {
       addToast('Failed to sync event', 'error');
       console.error('Finalize event error:', error);
     }
-  };
+  }, [account, addToast, finalizePendingEvent, inputValue, refreshAccount, resetPendingInput]);
 
-  const handleInputDismiss = async () => {
+  const handleInputDismiss = useCallback(async () => {
     try {
       await finalizePendingEvent();
       if (account && !account.calendar_connected) {
@@ -466,7 +477,7 @@ export default function App() {
       addToast('Failed to sync event', 'error');
       console.error('Finalize event error:', error);
     }
-  };
+  }, [account, addToast, finalizePendingEvent, refreshAccount, resetPendingInput]);
 
   useEffect(() => {
     if (!authHeaders || !account?.calendar_connected) {
@@ -480,6 +491,18 @@ export default function App() {
 
     return () => window.clearInterval(interval);
   }, [authHeaders, account?.calendar_connected, account?.google_calendar_id, runGoogleSync]);
+
+  useEffect(() => {
+    if (!showInput || !pendingLog || inputValue.trim()) {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void handleInputDismiss();
+    }, NOTE_SHEET_AUTO_DISMISS_MS);
+
+    return () => window.clearTimeout(timeout);
+  }, [handleInputDismiss, inputValue, pendingLog, showInput]);
 
   if (authLoading) {
     return <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-700">Loading…</div>;
@@ -559,14 +582,30 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-blue-100 dark:selection:bg-blue-900">
-      <header className="fixed top-0 inset-x-0 min-h-16 bg-white/85 dark:bg-slate-900/85 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 z-10 px-4 py-3">
+    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-blue-100 dark:selection:bg-blue-900">
+      <header className="sticky top-0 inset-x-0 shrink-0 bg-white/85 dark:bg-slate-900/85 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 z-10 px-4 py-3">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Baby Tracker</h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
-            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveView('settings')}
+                className={clsx(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition hover:opacity-90',
+                  account.calendar_connected
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+                )}
+                aria-label="Open calendar settings"
+              >
+                <ShieldCheck size={12} />
+                {account.calendar_connected ? 'Sync active' : 'Local only'}
+              </button>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -587,9 +626,9 @@ export default function App() {
         </div>
       </header>
 
-      <main className="pt-24 pb-32 px-6 max-w-3xl mx-auto min-h-screen">
+      <main className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 pb-4 pt-3 sm:px-6">
         {activeView === 'settings' ? (
-          <section className="max-w-xl mx-auto space-y-6">
+          <section className="mx-auto w-full max-w-xl pb-6">
             <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-lg p-6 space-y-5">
               <div>
                 <h2 className="text-xl font-bold">Calendar settings</h2>
@@ -708,16 +747,29 @@ export default function App() {
             </div>
           </section>
         ) : (
-          <>
-            <div className="text-center mb-10 space-y-3">
-              <p className="text-slate-500 dark:text-slate-400 font-medium">What's happening right now?</p>
-              <div className={clsx('inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold', account.calendar_connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}>
-                <ShieldCheck size={14} />
-                {account.calendar_connected ? 'Calendar sync active' : 'Saving locally until sync is enabled'}
-              </div>
+          <section className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain pb-2">
+            <div className="shrink-0 space-y-2 text-center">
+              <p className="text-sm font-medium text-slate-500 dark:text-slate-400">What's happening right now?</p>
+
+              {showInteractionTip && (
+                <div className="mx-auto flex max-w-md items-center gap-2 rounded-2xl border border-blue-200/80 bg-blue-50/80 px-3 py-2 text-left shadow-sm dark:border-blue-800 dark:bg-blue-950/30">
+                  <div className="rounded-xl bg-blue-100 p-1.5 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300">
+                    <HelpCircle size={14} />
+                  </div>
+                  <p className="min-w-0 flex-1 text-xs text-slate-600 dark:text-slate-300">
+                    Tap to log. Hold to start or stop a timer.
+                  </p>
+                  <button
+                    onClick={hideInteractionTip}
+                    className="rounded-xl bg-white/90 px-2.5 py-1.5 text-[11px] font-semibold text-blue-700 shadow-sm ring-1 ring-blue-200 transition hover:bg-white dark:bg-slate-900/70 dark:text-blue-300 dark:ring-blue-800"
+                  >
+                    Got it
+                  </button>
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-10 justify-items-center">
+            <div className="grid flex-1 min-h-0 content-start justify-items-center gap-x-4 gap-y-4 pt-1 sm:content-center md:grid-cols-4 md:gap-x-6 md:gap-y-8 grid-cols-2">
               {ACTIVITIES.map((activity) => (
                 <ActivityButton
                   key={`${activity.id}-${runningActivity?.id === activity.id ? runningActivity.startTime : 'idle'}`}
@@ -728,23 +780,49 @@ export default function App() {
                 />
               ))}
             </div>
-          </>
+          </section>
         )}
 
         <div
           className={clsx(
-            'fixed inset-x-0 bottom-0 p-4 z-50 transition-transform duration-500 ease-spring',
-            showInput ? 'translate-y-0' : 'translate-y-[120%]',
+            'fixed inset-0 z-50 flex items-end justify-center bg-slate-950/10 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-300',
+            showInput ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
           )}
+          onClick={() => {
+            if (showInput) {
+              void handleInputDismiss();
+            }
+          }}
         >
-          <div className="max-w-md mx-auto bg-white dark:bg-slate-800 rounded-3xl shadow-2xl border border-slate-100 dark:border-slate-700 p-4 ring-1 ring-black/5">
-            <div className="flex items-center gap-3">
+          <div
+            className={clsx(
+              'w-full max-w-sm rounded-3xl border border-slate-100 bg-white p-4 shadow-2xl ring-1 ring-black/5 transition-transform duration-500 ease-spring dark:border-slate-700 dark:bg-slate-800',
+              showInput ? 'translate-y-0' : 'translate-y-[120%]',
+            )}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Add a note?</p>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Optional for {pendingActivityLabel}. Auto-skips in {Math.floor(NOTE_SHEET_AUTO_DISMISS_MS / 1000)}s.
+                </p>
+              </div>
+              <button
+                onClick={() => void handleInputDismiss()}
+                className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+              >
+                Skip
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={inputValue}
                 onChange={(event) => setInputValue(event.target.value)}
-                placeholder={`Add note for ${ACTIVITIES.find((activity) => activity.id === pendingLog?.activityId)?.label ?? 'event'}...`}
-                className="flex-1 bg-slate-100 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-slate-400"
+                placeholder={`Add note for ${pendingActivityLabel}...`}
+                className="min-w-0 flex-1 bg-slate-100 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-slate-400"
                 autoFocus={showInput}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -757,17 +835,13 @@ export default function App() {
               />
               <button
                 onClick={() => void handleInputSubmit()}
-                className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 active:scale-95 transition-all"
+                className="shrink-0 rounded-xl bg-blue-600 p-3 text-white transition-all hover:bg-blue-700 active:scale-95"
+                aria-label="Save note"
               >
                 <Send size={20} strokeWidth={2.5} />
               </button>
-              <button
-                onClick={() => void handleInputDismiss()}
-                className="p-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 active:scale-95 transition-all"
-              >
-                <X size={24} />
-              </button>
             </div>
+
           </div>
         </div>
       </main>
