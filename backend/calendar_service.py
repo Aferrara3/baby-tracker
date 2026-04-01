@@ -8,6 +8,7 @@ from typing import Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from config import CALENDAR_SHARE_ROLE, CALENDAR_TIME_ZONE
 
@@ -40,6 +41,39 @@ def normalize_activity_type(activity_type: str) -> str:
     return ACTIVITY_TYPE_ALIASES.get(activity_type, activity_type)
 
 
+def activity_label(activity_type: str) -> str:
+    normalized_type = normalize_activity_type(activity_type)
+    return ACTIVITY_META.get(normalized_type, (f"🍼 {normalized_type.title()}", "1"))[0]
+
+
+SUMMARY_TYPE_MAP: dict[str, str] = {
+    activity_label(activity_type): activity_type
+    for activity_type in ACTIVITY_META
+}
+SUMMARY_TYPE_MAP.update(
+    {
+        "Bottle": "bottle",
+        "Food": "food",
+        "Diaper (Pee)": "diaper_pee",
+        "Diaper (Poop)": "diaper_poop",
+        "Sleep": "sleep",
+        "Breastfeeding": "breastfeeding",
+        "Pump": "pump",
+        "Help": "help",
+        "Nursing": "breastfeeding",
+        "Other": "help",
+    }
+)
+
+
+def infer_activity_type_from_summary(summary: Optional[str], fallback: Optional[str] = None) -> str:
+    if not summary:
+        return fallback or "help"
+
+    normalized_summary = summary.strip()
+    return normalize_activity_type(SUMMARY_TYPE_MAP.get(normalized_summary, fallback or "help"))
+
+
 class CalendarService:
     """Wraps the Google Calendar API for calendar provisioning and event sync."""
 
@@ -51,12 +85,14 @@ class CalendarService:
     def create_event_from_baby_event(self, event, calendar_id: Optional[str] = None) -> dict:
         if isinstance(event, dict):
             event_type = event.get("type", "unknown")
+            title = event.get("title")
             start_time = event.get("start_time") or datetime.now(timezone.utc)
             end_time = event.get("end_time")
             duration = event.get("duration")
             details = event.get("details")
         else:
             event_type = getattr(event, "type", "unknown")
+            title = getattr(event, "title", None)
             start_time = getattr(event, "start_time", datetime.now(timezone.utc))
             end_time = getattr(event, "end_time", None)
             duration = getattr(event, "duration", None)
@@ -64,6 +100,7 @@ class CalendarService:
 
         body = self.build_event_body(
             event_type=event_type,
+            title=title,
             start_time=start_time,
             end_time=end_time,
             duration=duration,
@@ -74,12 +111,14 @@ class CalendarService:
     def update_event_from_baby_event(self, calendar_event_id: str, event, calendar_id: Optional[str] = None) -> dict:
         if isinstance(event, dict):
             event_type = event.get("type", "unknown")
+            title = event.get("title")
             start_time = event.get("start_time") or datetime.now(timezone.utc)
             end_time = event.get("end_time")
             duration = event.get("duration")
             details = event.get("details")
         else:
             event_type = getattr(event, "type", "unknown")
+            title = getattr(event, "title", None)
             start_time = getattr(event, "start_time", datetime.now(timezone.utc))
             end_time = getattr(event, "end_time", None)
             duration = getattr(event, "duration", None)
@@ -87,6 +126,7 @@ class CalendarService:
 
         body = self.build_event_body(
             event_type=event_type,
+            title=title,
             start_time=start_time,
             end_time=end_time,
             duration=duration,
@@ -98,12 +138,13 @@ class CalendarService:
         self,
         event_type: str,
         start_time: datetime,
+        title: Optional[str] = None,
         end_time: Optional[datetime] = None,
         duration: Optional[int] = None,
         details: Optional[str] = None,
     ) -> dict:
         normalized_type = normalize_activity_type(event_type)
-        label, color_id = ACTIVITY_META.get(normalized_type, (f"🍼 {normalized_type.title()}", "1"))
+        label, color_id = ACTIVITY_META.get(normalized_type, (activity_label(normalized_type), "1"))
 
         if isinstance(start_time, datetime) and start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)
@@ -125,7 +166,7 @@ class CalendarService:
         description = "\n".join(description_parts) if description_parts else None
 
         body: dict = {
-            "summary": label,
+            "summary": title or label,
             "start": {"dateTime": start_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
             "end": {"dateTime": end_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
         }
@@ -234,6 +275,49 @@ class CalendarService:
         service = self._get_service()
         service.events().list(calendarId=resolved_calendar_id, maxResults=1).execute()
         return True
+
+    def list_event_changes(
+        self,
+        calendar_id: Optional[str] = None,
+        sync_token: Optional[str] = None,
+    ) -> dict:
+        resolved_calendar_id = self._resolve_calendar_id(calendar_id)
+        service = self._get_service()
+        params = {
+            "calendarId": resolved_calendar_id,
+            "showDeleted": True,
+        }
+        if sync_token:
+            params["syncToken"] = sync_token
+
+        items: list[dict] = []
+        next_sync_token: Optional[str] = None
+        full_sync = sync_token is None
+
+        while True:
+            try:
+                response = service.events().list(**params).execute()
+            except HttpError as exc:
+                status = getattr(exc.resp, "status", None)
+                if sync_token and status == 410:
+                    logger.info("Google sync token expired for %s; falling back to full sync", resolved_calendar_id)
+                    return self.list_event_changes(calendar_id=resolved_calendar_id, sync_token=None)
+                raise
+
+            items.extend(response.get("items", []))
+            page_token = response.get("nextPageToken")
+            if page_token:
+                params["pageToken"] = page_token
+                continue
+
+            next_sync_token = response.get("nextSyncToken")
+            break
+
+        return {
+            "items": items,
+            "next_sync_token": next_sync_token,
+            "full_sync": full_sync,
+        }
 
     def _resolve_calendar_id(self, calendar_id: Optional[str]) -> str:
         resolved = calendar_id or self.calendar_id

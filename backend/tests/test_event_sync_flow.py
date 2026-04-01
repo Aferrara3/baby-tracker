@@ -20,16 +20,23 @@ class FakeCalendarService:
         self.created_calendars: list[dict] = []
         self.shared_calendars: list[dict] = []
         self.updated_calendars: list[dict] = []
+        self.sync_responses: list[dict] = []
 
     def create_event_from_baby_event(self, event, calendar_id=None) -> dict:
         payload = {
             "id": f"event-{len(self.created_events) + 1}",
             "calendar_id": calendar_id,
             "type": event.type,
+            "summary": getattr(event, "title", None) or main.activity_label(event.type),
+            "description": getattr(event, "google_description", None),
             "start_time": event.start_time,
+            "start": {"dateTime": event.start_time.isoformat()},
             "end_time": event.end_time,
+            "end": {"dateTime": event.end_time.isoformat()} if event.end_time else None,
             "duration": event.duration,
             "details": event.details,
+            "etag": f"etag-{len(self.created_events) + 1}",
+            "updated": datetime.now(timezone.utc).isoformat(),
         }
         self.created_events.append(payload)
         return payload
@@ -39,7 +46,11 @@ class FakeCalendarService:
             "id": calendar_event_id,
             "calendar_id": calendar_id,
             "type": event.type,
+            "summary": getattr(event, "title", None) or main.activity_label(event.type),
+            "description": getattr(event, "google_description", None),
             "details": event.details,
+            "etag": f"etag-update-{len(self.updated_events) + 1}",
+            "updated": datetime.now(timezone.utc).isoformat(),
         }
         self.updated_events.append(payload)
         return payload
@@ -81,6 +92,20 @@ class FakeCalendarService:
                 "calendar_id": calendar_id,
             }
         )
+
+    def list_event_changes(self, calendar_id=None, sync_token=None) -> dict:
+        if self.sync_responses:
+            response = self.sync_responses.pop(0)
+            return {
+                "items": response.get("items", []),
+                "next_sync_token": response.get("next_sync_token"),
+                "full_sync": response.get("full_sync", sync_token is None),
+            }
+        return {
+            "items": [],
+            "next_sync_token": sync_token or "sync-token-empty",
+            "full_sync": sync_token is None,
+        }
 
 
 @pytest.fixture()
@@ -416,6 +441,157 @@ def test_delete_events_for_day_uses_local_timezone_boundaries(client: TestClient
     remaining = client.get("/events", headers=headers)
     assert len(remaining.json()) == 1
     assert remaining.json()[0]["start_time"].startswith("2026-04-02T06:30:00")
+
+
+def test_google_sync_imports_remote_updates_and_new_events(client: TestClient):
+    data = register(client, "google-sync-user", "secret123", baby_name="Sync Baby")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={
+            "type": "food",
+            "start_time": "2026-04-02T15:00:00+00:00",
+            "end_time": "2026-04-02T15:20:00+00:00",
+            "duration": 1200,
+        },
+    )
+    client.post(
+        f"/events/{created.json()['id']}/finalize",
+        headers=headers,
+        json={"details": "original note"},
+    )
+
+    fake_service = main.get_calendar_service()
+    fake_service.sync_responses.append(
+        {
+            "full_sync": False,
+            "next_sync_token": "sync-token-1",
+            "items": [
+                {
+                    "id": "event-1",
+                    "status": "confirmed",
+                    "summary": "Night Sleep",
+                    "description": "Notes: updated from google",
+                    "start": {"dateTime": "2026-04-02T16:00:00+00:00"},
+                    "end": {"dateTime": "2026-04-02T18:30:00+00:00"},
+                    "etag": "etag-remote-1",
+                    "updated": "2026-04-02T18:31:00+00:00",
+                },
+                {
+                    "id": "google-new-1",
+                    "status": "confirmed",
+                    "summary": "🍼 Bottle",
+                    "description": "Notes: created directly in google",
+                    "start": {"dateTime": "2026-04-02T19:00:00+00:00"},
+                    "end": {"dateTime": "2026-04-02T19:15:00+00:00"},
+                    "etag": "etag-remote-2",
+                    "updated": "2026-04-02T19:16:00+00:00",
+                },
+            ],
+        }
+    )
+
+    synced = client.post("/calendar/sync", headers=headers)
+    assert synced.status_code == 200
+    payload = synced.json()
+    assert payload["updated_count"] == 1
+    assert payload["imported_count"] == 1
+    assert payload["deleted_count"] == 0
+    assert payload["next_sync_token"] == "sync-token-1"
+
+    events = client.get("/events", headers=headers).json()
+    updated_event = next(event for event in events if event["id"] == created.json()["id"])
+    imported_event = next(event for event in events if event["title"] == "🍼 Bottle" and event["id"] != created.json()["id"])
+
+    assert updated_event["title"] == "Night Sleep"
+    assert updated_event["type"] == "food"
+    assert updated_event["details"] == "updated from google"
+    assert updated_event["start_time"].startswith("2026-04-02T16:00:00")
+
+    assert imported_event["type"] == "bottle"
+    assert imported_event["details"] == "created directly in google"
+
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["google_last_sync_status"] == "ok"
+    assert me["google_last_synced_at"] is not None
+
+
+def test_google_sync_deletes_cancelled_remote_events(client: TestClient):
+    data = register(client, "google-delete-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "sleep", "start_time": "2026-04-02T10:00:00+00:00", "end_time": "2026-04-02T11:00:00+00:00", "duration": 3600},
+    )
+    client.post(f"/events/{created.json()['id']}/finalize", headers=headers, json={})
+
+    fake_service = main.get_calendar_service()
+    fake_service.sync_responses.append(
+        {
+            "full_sync": False,
+            "next_sync_token": "sync-token-delete",
+            "items": [
+                {
+                    "id": "event-1",
+                    "status": "cancelled",
+                }
+            ],
+        }
+    )
+
+    synced = client.post("/calendar/sync", headers=headers)
+    assert synced.status_code == 200
+    assert synced.json()["deleted_count"] == 1
+
+    events = client.get("/events", headers=headers)
+    assert events.json() == []
+
+
+def test_google_sync_reassigns_type_when_title_matches_known_activity(client: TestClient):
+    data = register(client, "google-title-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "help", "start_time": "2026-04-02T12:00:00+00:00"},
+    )
+    client.post(f"/events/{created.json()['id']}/finalize", headers=headers, json={})
+
+    fake_service = main.get_calendar_service()
+    fake_service.sync_responses.append(
+        {
+            "full_sync": False,
+            "next_sync_token": "sync-token-title",
+            "items": [
+                {
+                    "id": "event-1",
+                    "status": "confirmed",
+                    "summary": "😴 Sleep",
+                    "description": "Notes: retitled in google",
+                    "start": {"dateTime": "2026-04-02T12:30:00+00:00"},
+                    "end": {"dateTime": "2026-04-02T13:45:00+00:00"},
+                    "etag": "etag-title",
+                    "updated": "2026-04-02T13:46:00+00:00",
+                }
+            ],
+        }
+    )
+
+    synced = client.post("/calendar/sync", headers=headers)
+    assert synced.status_code == 200
+
+    event = client.get("/events", headers=headers).json()[0]
+    assert event["type"] == "sleep"
+    assert event["title"] == "😴 Sleep"
+    assert event["details"] == "retitled in google"
 
 
 def test_unauthenticated_requests_are_rejected(client: TestClient):

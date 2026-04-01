@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BottleWine,
   Utensils,
@@ -19,8 +19,8 @@ import { clsx } from 'clsx';
 
 import ActivityButton from './components/ActivityButton';
 import Toast from './components/Toast';
+import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 
-const API_BASE = 'http://localhost:8090';
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
@@ -47,6 +47,8 @@ interface Account {
   calendar_connected: boolean;
   service_managed_calendar: boolean;
   calendar_url: string | null;
+  google_last_synced_at: string | null;
+  google_last_sync_status: string | null;
 }
 
 interface AuthResponse {
@@ -93,6 +95,7 @@ export default function App() {
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const autoSyncInFlightRef = useRef(false);
 
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
@@ -209,7 +212,7 @@ export default function App() {
     addToast('Signed out', 'info');
   };
 
-  const refreshAccount = async () => {
+  const refreshAccount = useCallback(async (preserveSettingsDrafts = false) => {
     if (!authHeaders) {
       return;
     }
@@ -218,8 +221,27 @@ export default function App() {
       headers: authHeaders,
     });
     setAccount(response.data);
-    setSettingsBabyName(response.data.baby_name ?? '');
-    setSettingsShareEmails(response.data.share_emails.join(', '));
+    if (!preserveSettingsDrafts) {
+      setSettingsBabyName(response.data.baby_name ?? '');
+      setSettingsShareEmails(response.data.share_emails.join(', '));
+    }
+  }, [authHeaders]);
+
+  const saveSettingsRequest = async () => {
+    if (!authHeaders) {
+      return null;
+    }
+
+    const response = await axios.patch<Account>(
+      `${API_BASE}/account/settings`,
+      {
+        baby_name: settingsBabyName || null,
+        share_emails: parseEmails(settingsShareEmails),
+      },
+      { headers: authHeaders },
+    );
+    setAccount(response.data);
+    return response.data;
   };
 
   const handleSaveSettings = async () => {
@@ -229,15 +251,7 @@ export default function App() {
 
     setIsBusy(true);
     try {
-      const response = await axios.patch<Account>(
-        `${API_BASE}/account/settings`,
-        {
-          baby_name: settingsBabyName || null,
-          share_emails: parseEmails(settingsShareEmails),
-        },
-        { headers: authHeaders },
-      );
-      setAccount(response.data);
+      await saveSettingsRequest();
       addToast('Settings saved', 'success');
     } catch (error) {
       addToast('Failed to save settings', 'error');
@@ -254,6 +268,7 @@ export default function App() {
 
     setIsBusy(true);
     try {
+      await saveSettingsRequest();
       const response = await axios.post<Account>(`${API_BASE}/calendar/enable-sync`, {}, { headers: authHeaders });
       setAccount(response.data);
       addToast('Calendar sync enabled', 'success');
@@ -278,6 +293,48 @@ export default function App() {
     } catch (error) {
       addToast('Failed to re-share calendar', 'error');
       console.error('Reshare error:', error);
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const runGoogleSync = useCallback(async (showToast: boolean) => {
+    if (!authHeaders) {
+      return;
+    }
+
+    if (autoSyncInFlightRef.current) {
+      return;
+    }
+
+    autoSyncInFlightRef.current = true;
+    try {
+      const response = await axios.post<{
+        imported_count: number;
+        updated_count: number;
+        deleted_count: number;
+      }>(`${API_BASE}/calendar/sync`, {}, { headers: authHeaders });
+      await refreshAccount(true);
+      if (showToast) {
+        addToast(
+          `Synced Google changes (+${response.data.imported_count} new, ${response.data.updated_count} updated, ${response.data.deleted_count} deleted)`,
+          'success',
+        );
+      }
+    } catch (error) {
+      if (showToast) {
+        addToast('Failed to sync from Google', 'error');
+      }
+      console.error('Google sync error:', error);
+    } finally {
+      autoSyncInFlightRef.current = false;
+    }
+  }, [authHeaders, refreshAccount]);
+
+  const handleForceSyncFromGoogle = async () => {
+    setIsBusy(true);
+    try {
+      await runGoogleSync(true);
     } finally {
       setIsBusy(false);
     }
@@ -410,6 +467,19 @@ export default function App() {
       console.error('Finalize event error:', error);
     }
   };
+
+  useEffect(() => {
+    if (!authHeaders || !account?.calendar_connected) {
+      return undefined;
+    }
+
+    void runGoogleSync(false);
+    const interval = window.setInterval(() => {
+      void runGoogleSync(false);
+    }, GOOGLE_SYNC_POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, [authHeaders, account?.calendar_connected, account?.google_calendar_id, runGoogleSync]);
 
   if (authLoading) {
     return <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-700">Loading…</div>;
@@ -548,7 +618,7 @@ export default function App() {
                     className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-                    Save first, then enable sync or re-share to push ACL updates.
+                    Enable sync will save the current baby name and share-email edits automatically first.
                   </p>
                 </div>
               </div>
@@ -573,6 +643,11 @@ export default function App() {
                       ? 'You are still linked to the legacy shared calendar. Enabling sync will provision your own household calendar.'
                       : 'Provisioning creates a service-account-owned calendar for this household.'}
                 </p>
+                {account.google_last_synced_at && (
+                  <p className="text-slate-500 dark:text-slate-400">
+                    Last Google pull sync: {new Date(account.google_last_synced_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                  </p>
+                )}
               </div>
 
               <div className="grid gap-3 sm:grid-cols-3">
@@ -606,7 +681,7 @@ export default function App() {
                     Handy cleanup and visualization shortcuts scoped only to this signed-in household.
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-3">
                   <button
                     onClick={() => void handleClearToday()}
                     disabled={isBusy}
@@ -620,6 +695,13 @@ export default function App() {
                     className="rounded-2xl bg-violet-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
                   >
                     Simulate sample day
+                  </button>
+                  <button
+                    onClick={() => void handleForceSyncFromGoogle()}
+                    disabled={isBusy || !account.calendar_connected}
+                    className="rounded-2xl bg-violet-700 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                  >
+                    Force sync now
                   </button>
                 </div>
               </div>
