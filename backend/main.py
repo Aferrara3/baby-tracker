@@ -1,10 +1,27 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import SQLModel, create_engine, Session, select, Field
+from sqlalchemy import text
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
-import os
+
+from calendar_service import CalendarService, normalize_activity_type
+from config import CREDENTIALS_PATH, CALENDAR_ID
+
+logger = logging.getLogger(__name__)
+
+_calendar_service: Optional[CalendarService] = None
+
+
+def get_calendar_service() -> CalendarService:
+    global _calendar_service
+    if _calendar_service is None:
+        _calendar_service = CalendarService(CREDENTIALS_PATH, CALENDAR_ID)
+    return _calendar_service
+
 
 # Database setup
 DATABASE_URL = "sqlite:///./database.db"
@@ -18,6 +35,8 @@ class Event(SQLModel, table=True):
     end_time: Optional[datetime] = None
     duration: Optional[int] = None  # in seconds
     details: Optional[str] = None
+    calendar_event_id: Optional[str] = None
+    calendar_synced_at: Optional[datetime] = None
 
 
 class EventCreate(BaseModel):
@@ -45,9 +64,6 @@ class ActivityStart(BaseModel):
 class ActivityStop(BaseModel):
     type: str
 
-
-# Create tables
-SQLModel.metadata.create_all(engine)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -79,7 +95,7 @@ def read_root():
 def create_event(event: EventCreate):
     """Create a new event log."""
     db_event = Event(
-        type=event.type,
+        type=normalize_activity_type(event.type),
         start_time=event.start_time,
         end_time=event.end_time,
         duration=event.duration,
@@ -89,14 +105,7 @@ def create_event(event: EventCreate):
         session.add(db_event)
         session.commit()
         session.refresh(db_event)
-        return EventResponse(
-            id=db_event.id,
-            type=db_event.type,
-            start_time=db_event.start_time,
-            end_time=db_event.end_time,
-            duration=db_event.duration,
-            details=db_event.details
-        )
+        return _event_response(db_event)
 
 
 @app.get("/events", response_model=List[EventResponse])
@@ -105,14 +114,7 @@ def list_events():
     with Session(engine) as session:
         events = session.exec(select(Event)).all()
         return [
-            EventResponse(
-                id=event.id,
-                type=event.type,
-                start_time=event.start_time,
-                end_time=event.end_time,
-                duration=event.duration,
-                details=event.details
-            )
+            _event_response(event)
             for event in events
         ]
 
@@ -120,41 +122,43 @@ def list_events():
 @app.post("/activities/start")
 def start_activity(activity: ActivityStart):
     """Start a timer for an activity type."""
-    if activity.type in active_timers:
+    activity_type = normalize_activity_type(activity.type)
+    if activity_type in active_timers:
         return {
             "status": "error",
-            "message": f"Activity '{activity.type}' is already running"
+            "message": f"Activity '{activity_type}' is already running"
         }
     
-    active_timers[activity.type] = {
-        "start_time": datetime.now(),
+    active_timers[activity_type] = {
+        "start_time": datetime.now(timezone.utc),
         "details": activity.details
     }
     
     return {
         "status": "success",
-        "message": f"Started tracking '{activity.type}'",
-        "start_time": active_timers[activity.type]["start_time"]
+        "message": f"Started tracking '{activity_type}'",
+        "start_time": active_timers[activity_type]["start_time"]
     }
 
 
 @app.post("/activities/stop")
 def stop_activity(activity: ActivityStop):
     """Stop a timer and log the duration."""
-    if activity.type not in active_timers:
+    activity_type = normalize_activity_type(activity.type)
+    if activity_type not in active_timers:
         return {
             "status": "error",
-            "message": f"No active timer for '{activity.type}'"
+            "message": f"No active timer for '{activity_type}'"
         }
     
-    timer_data = active_timers.pop(activity.type)
+    timer_data = active_timers.pop(activity_type)
     start_time = timer_data["start_time"]
-    end_time = datetime.now()
+    end_time = datetime.now(timezone.utc)
     duration = int((end_time - start_time).total_seconds())
     
     # Create and save the event
     db_event = Event(
-        type=activity.type,
+        type=activity_type,
         start_time=start_time,
         end_time=end_time,
         duration=duration,
@@ -165,19 +169,66 @@ def stop_activity(activity: ActivityStop):
         session.add(db_event)
         session.commit()
         session.refresh(db_event)
-    
-    return {
-        "status": "success",
-        "message": f"Stopped tracking '{activity.type}'",
-        "event_id": db_event.id,
-        "start_time": start_time,
-        "end_time": end_time,
-        "duration_seconds": duration
-    }
+        return {
+            "status": "success",
+            "message": f"Stopped tracking '{activity_type}'",
+            "event_id": db_event.id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration_seconds": duration
+        }
 
 
 class EventUpdate(BaseModel):
-    details: str
+    details: Optional[str] = None
+
+
+class EventFinalize(BaseModel):
+    details: Optional[str] = None
+
+
+def _ensure_event_columns() -> None:
+    """Add new event columns to an existing SQLite database."""
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(event)")).fetchall()
+        }
+        if "calendar_event_id" not in columns:
+            connection.execute(text("ALTER TABLE event ADD COLUMN calendar_event_id VARCHAR"))
+        if "calendar_synced_at" not in columns:
+            connection.execute(text("ALTER TABLE event ADD COLUMN calendar_synced_at DATETIME"))
+
+
+def _event_response(event: Event) -> EventResponse:
+    return EventResponse(
+        id=event.id,
+        type=event.type,
+        start_time=event.start_time,
+        end_time=event.end_time,
+        duration=event.duration,
+        details=event.details,
+    )
+
+
+def _sync_event_to_calendar(session: Session, event: Event) -> Event:
+    service = get_calendar_service()
+    if event.calendar_event_id:
+        result = service.update_event_from_baby_event(event.calendar_event_id, event)
+    else:
+        result = service.create_event_from_baby_event(event)
+
+    event.calendar_event_id = result["id"]
+    event.calendar_synced_at = datetime.now(timezone.utc)
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+    return event
+
+
+# Create tables
+SQLModel.metadata.create_all(engine)
+_ensure_event_columns()
 
 
 @app.patch("/events/{event_id}", response_model=EventResponse)
@@ -186,20 +237,33 @@ def update_event(event_id: int, event_update: EventUpdate):
     with Session(engine) as session:
         event = session.get(Event, event_id)
         if not event:
-            return {"error": "Event not found"}
-        
-        event.details = event_update.details
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        event.details = event_update.details.strip() if event_update.details else None
         session.add(event)
         session.commit()
         session.refresh(event)
-        return EventResponse(
-            id=event.id,
-            type=event.type,
-            start_time=event.start_time,
-            end_time=event.end_time,
-            duration=event.duration,
-            details=event.details
-        )
+        if event.calendar_event_id:
+            event = _sync_event_to_calendar(session, event)
+        return _event_response(event)
+
+
+@app.post("/events/{event_id}/finalize", response_model=EventResponse)
+def finalize_event(event_id: int, event_finalize: EventFinalize):
+    """Persist final notes and then sync the event to Google Calendar."""
+    with Session(engine) as session:
+        event = session.get(Event, event_id)
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        if event_finalize.details is not None:
+            event.details = event_finalize.details.strip() or None
+            session.add(event)
+            session.commit()
+            session.refresh(event)
+
+        event = _sync_event_to_calendar(session, event)
+        return _event_response(event)
 
 
 if __name__ == "__main__":

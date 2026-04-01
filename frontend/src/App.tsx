@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   BottleWine,
   Utensils,
@@ -25,11 +25,17 @@ interface Activity {
   colorClass: string;
 }
 
+interface ToastItem {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
+
 const ACTIVITIES: Activity[] = [
   { id: 'bottle', icon: BottleWine, label: 'Bottle', colorClass: 'bg-gradient-to-br from-blue-400 to-blue-600 dark:from-blue-500 dark:to-blue-700 shadow-blue-200 dark:shadow-blue-900/30' },
   { id: 'food', icon: Utensils, label: 'Food', colorClass: 'bg-gradient-to-br from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700 shadow-amber-200 dark:shadow-amber-900/30' },
-  { id: 'diaper1', icon: Baby, label: 'Pee', colorClass: 'bg-gradient-to-br from-cyan-400 to-cyan-600 dark:from-cyan-500 dark:to-cyan-700 shadow-cyan-200 dark:shadow-cyan-900/30' },
-  { id: 'diaper2', icon: Baby, label: 'Poop', colorClass: 'bg-gradient-to-br from-pink-400 to-pink-600 dark:from-pink-500 dark:to-pink-700 shadow-pink-200 dark:shadow-pink-900/30' },
+  { id: 'diaper_pee', icon: Baby, label: 'Pee', colorClass: 'bg-gradient-to-br from-cyan-400 to-cyan-600 dark:from-cyan-500 dark:to-cyan-700 shadow-cyan-200 dark:shadow-cyan-900/30' },
+  { id: 'diaper_poop', icon: Baby, label: 'Poop', colorClass: 'bg-gradient-to-br from-pink-400 to-pink-600 dark:from-pink-500 dark:to-pink-700 shadow-pink-200 dark:shadow-pink-900/30' },
   { id: 'sleep', icon: Moon, label: 'Sleep', colorClass: 'bg-gradient-to-br from-indigo-400 to-indigo-600 dark:from-indigo-500 dark:to-indigo-700 shadow-indigo-200 dark:shadow-indigo-900/30' },
   { id: 'breastfeeding', icon: User2, label: 'Nursing', colorClass: 'bg-gradient-to-br from-rose-400 to-rose-600 dark:from-rose-500 dark:to-rose-700 shadow-rose-200 dark:shadow-rose-900/30' },
   { id: 'pump', icon: Milk, label: 'Pump', colorClass: 'bg-gradient-to-br from-orange-400 to-orange-600 dark:from-orange-500 dark:to-orange-700 shadow-orange-200 dark:shadow-orange-900/30' },
@@ -107,24 +113,43 @@ export default function App() {
   };
 
   const handleInputSubmit = async () => {
-    if (!pendingLog || !inputValue.trim()) {
-      closeInput();
+    if (!pendingLog) {
+      resetInput();
       return;
     }
 
     try {
-      await axios.patch(`${API_BASE}/events/${pendingLog.eventId}`, {
-        details: inputValue,
+      await axios.post(`${API_BASE}/events/${pendingLog.eventId}/finalize`, {
+        details: inputValue.trim() || undefined,
       });
-      addToast('Note saved', 'success');
+      if (inputValue.trim()) {
+        addToast('Note saved', 'success');
+      }
     } catch (error) {
-      addToast('Failed to save note', 'error');
-      console.error('Error saving details:', error);
+      addToast('Failed to sync event', 'error');
+      console.error('Error finalizing event:', error);
+      return;
     }
-    closeInput();
+    resetInput();
   };
 
-  const closeInput = () => {
+  const handleInputDismiss = async () => {
+    if (!pendingLog) {
+      resetInput();
+      return;
+    }
+
+    try {
+      await axios.post(`${API_BASE}/events/${pendingLog.eventId}/finalize`, {});
+    } catch (error) {
+      addToast('Failed to sync event', 'error');
+      console.error('Error finalizing event:', error);
+      return;
+    }
+    resetInput();
+  };
+
+  const resetInput = () => {
     setShowInput(false);
     setPendingLog(null);
     setInputValue('');
@@ -176,23 +201,22 @@ export default function App() {
                 onChange={(e) => setInputValue(e.target.value)}
                 placeholder={`Add note for ${ACTIVITIES.find(a => a.id === pendingLog?.activityId)?.label}...`}
                 className="flex-1 bg-slate-100 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-slate-400"
-                autoFocus={showInput}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleInputSubmit();
-                  if (e.key === 'Escape') closeInput();
-                }}
-              />
-              <button
-                onClick={handleInputSubmit}
-                disabled={!inputValue.trim()}
-                className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 active:scale-95 transition-all disabled:opacity-50 disabled:scale-100"
-              >
-                <Send size={20} strokeWidth={2.5} />
-              </button>
-              <button
-                onClick={closeInput}
-                className="p-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 active:scale-95 transition-all"
-              >
+                 autoFocus={showInput}
+                 onKeyDown={(e) => {
+                   if (e.key === 'Enter') void handleInputSubmit();
+                   if (e.key === 'Escape') void handleInputDismiss();
+                 }}
+               />
+               <button
+                 onClick={() => void handleInputSubmit()}
+                 className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 active:scale-95 transition-all"
+               >
+                 <Send size={20} strokeWidth={2.5} />
+               </button>
+               <button
+                 onClick={() => void handleInputDismiss()}
+                 className="p-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 active:scale-95 transition-all"
+               >
                 <X size={24} />
               </button>
             </div>
