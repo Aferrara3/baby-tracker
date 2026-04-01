@@ -27,14 +27,14 @@ export default function ActivityButton({
   const Icon = activity.icon;
 
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (isRunning) {
-      interval = setInterval(() => {
-        setTimerDuration((prev) => prev + 1);
-      }, 1000);
-    } else {
-      setTimerDuration(0);
+    if (!isRunning) {
+      return undefined;
     }
+
+    const interval = setInterval(() => {
+      setTimerDuration((value) => value + 1);
+    }, 1000);
+
     return () => clearInterval(interval);
   }, [isRunning]);
 

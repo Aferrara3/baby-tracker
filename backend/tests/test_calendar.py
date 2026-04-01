@@ -20,11 +20,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import CREDENTIALS_PATH, CALENDAR_ID
 from calendar_service import CalendarService, ACTIVITY_META, INSTANT_EVENT_DURATION_MINUTES
 
+LIVE_CALENDAR_TESTS_ENABLED = os.environ.get("ENABLE_LIVE_CALENDAR_TESTS") == "1"
+pytestmark = pytest.mark.skipif(
+    not LIVE_CALENDAR_TESTS_ENABLED,
+    reason="Live Google Calendar tests are opt-in. Set ENABLE_LIVE_CALENDAR_TESTS=1 to run them.",
+)
+
 
 @pytest.fixture(scope="module")
 def svc() -> CalendarService:
     """Shared CalendarService instance for all tests in this module."""
     return CalendarService(CREDENTIALS_PATH, CALENDAR_ID)
+
+
+@pytest.fixture(scope="module")
+def created_event_ids():
+    return []
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_live_events(svc, created_event_ids):
+    yield
+    for event_id in created_event_ids:
+        svc.delete_event(event_id, calendar_id=CALENDAR_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +65,7 @@ class TestCalendarAccess:
 # ---------------------------------------------------------------------------
 
 class TestCreateEvent:
-    def test_creates_event_returns_dict_with_id(self, svc):
+    def test_creates_event_returns_dict_with_id(self, svc, created_event_ids):
         now = datetime.now(timezone.utc)
         result = svc.create_event(
             summary="[test] Baby Tracker smoke test",
@@ -56,11 +74,12 @@ class TestCreateEvent:
             description="Automated test event – safe to delete",
             color_id="1",
         )
+        created_event_ids.append(result["id"])
         assert isinstance(result, dict)
         assert result.get("id"), "Response should contain an event id"
         assert result.get("summary") == "[test] Baby Tracker smoke test"
 
-    def test_event_times_are_stored_correctly(self, svc):
+    def test_event_times_are_stored_correctly(self, svc, created_event_ids):
         from dateutil.parser import parse as parse_dt
         start = datetime(2025, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
         end   = datetime(2025, 6, 1, 10, 30, 0, tzinfo=timezone.utc)
@@ -69,6 +88,7 @@ class TestCreateEvent:
             start_time=start,
             end_time=end,
         )
+        created_event_ids.append(result["id"])
         # Google returns times in the calendar's local timezone; compare as UTC instants
         returned_start = parse_dt(result["start"]["dateTime"]).astimezone(timezone.utc)
         returned_end   = parse_dt(result["end"]["dateTime"]).astimezone(timezone.utc)
@@ -83,7 +103,7 @@ class TestCreateEvent:
 class TestCreateEventFromBabyEvent:
 
     @pytest.mark.parametrize("activity_type", list(ACTIVITY_META.keys()))
-    def test_all_activity_types_create_event(self, svc, activity_type):
+    def test_all_activity_types_create_event(self, svc, activity_type, created_event_ids):
         """Every known activity type should produce a calendar event."""
         now = datetime.now(timezone.utc)
         event_dict = {
@@ -94,18 +114,20 @@ class TestCreateEventFromBabyEvent:
             "details": f"pytest – {activity_type}",
         }
         result = svc.create_event_from_baby_event(event_dict)
+        created_event_ids.append(result["id"])
         assert result.get("id"), f"No event id returned for activity type: {activity_type}"
         expected_label, expected_color = ACTIVITY_META[activity_type]
         assert result.get("summary") == expected_label
         assert result.get("colorId") == expected_color
 
-    def test_instant_tap_event_gets_default_duration(self, svc):
+    def test_instant_tap_event_gets_default_duration(self, svc, created_event_ids):
         """Events with no end_time or duration should still be created."""
         now = datetime.now(timezone.utc)
         result = svc.create_event_from_baby_event({
             "type": "bottle",
             "start_time": now,
         })
+        created_event_ids.append(result["id"])
         assert result.get("id")
         # End should be start + INSTANT_EVENT_DURATION_MINUTES; compare as UTC instants
         from dateutil.parser import parse as parse_dt
@@ -114,7 +136,7 @@ class TestCreateEventFromBabyEvent:
         diff_minutes = (end - start).total_seconds() / 60
         assert diff_minutes == INSTANT_EVENT_DURATION_MINUTES
 
-    def test_duration_in_description(self, svc):
+    def test_duration_in_description(self, svc, created_event_ids):
         """Duration seconds should be formatted in the event description."""
         now = datetime.now(timezone.utc)
         result = svc.create_event_from_baby_event({
@@ -123,9 +145,10 @@ class TestCreateEventFromBabyEvent:
             "end_time": now + timedelta(hours=2),
             "duration": 7200,
         })
+        created_event_ids.append(result["id"])
         assert "Duration: 120m 0s" in result.get("description", "")
 
-    def test_notes_in_description(self, svc):
+    def test_notes_in_description(self, svc, created_event_ids):
         """User-supplied details/notes should appear in the description."""
         now = datetime.now(timezone.utc)
         result = svc.create_event_from_baby_event({
@@ -134,9 +157,10 @@ class TestCreateEventFromBabyEvent:
             "end_time": now + timedelta(minutes=15),
             "details": "ate 4 oz of puree",
         })
+        created_event_ids.append(result["id"])
         assert "ate 4 oz of puree" in result.get("description", "")
 
-    def test_unknown_activity_type_uses_fallback(self, svc):
+    def test_unknown_activity_type_uses_fallback(self, svc, created_event_ids):
         """Unrecognised activity types should not raise, using fallback label/color."""
         now = datetime.now(timezone.utc)
         result = svc.create_event_from_baby_event({
@@ -144,10 +168,11 @@ class TestCreateEventFromBabyEvent:
             "start_time": now,
             "end_time": now + timedelta(minutes=5),
         })
+        created_event_ids.append(result["id"])
         assert result.get("id")
         assert "Custom_Activity" in result.get("summary", "")
 
-    def test_naive_datetime_is_handled(self, svc):
+    def test_naive_datetime_is_handled(self, svc, created_event_ids):
         """Timezone-naive datetimes should be accepted without error."""
         naive_start = datetime(2025, 7, 4, 8, 0, 0)  # no tzinfo
         result = svc.create_event_from_baby_event({
@@ -155,4 +180,5 @@ class TestCreateEventFromBabyEvent:
             "start_time": naive_start,
             "duration": 900,
         })
+        created_event_ids.append(result["id"])
         assert result.get("id")

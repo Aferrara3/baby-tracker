@@ -1,11 +1,4 @@
-"""
-Google Calendar integration for Baby Tracker.
-
-Usage:
-    from calendar_service import CalendarService
-    svc = CalendarService(credentials_path, calendar_id)
-    svc.create_event_from_baby_event(event)
-"""
+"""Google Calendar integration for Baby Tracker."""
 
 from __future__ import annotations
 
@@ -15,24 +8,22 @@ from typing import Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+
+from config import CALENDAR_SHARE_ROLE, CALENDAR_TIME_ZONE
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Maps baby tracker activity type → (emoji label, Google Calendar colorId)
-# Calendar color IDs: 1=Lavender, 2=Sage, 3=Grape, 4=Flamingo, 5=Banana,
-#                     6=Tangerine, 7=Peacock, 8=Graphite, 9=Blueberry, 10=Basil, 11=Tomato
 ACTIVITY_META: dict[str, tuple[str, str]] = {
-    "bottle":        ("🍼 Bottle",         "5"),   # Banana
-    "food":          ("🥄 Food",           "2"),   # Sage
-    "diaper_pee":    ("💧 Diaper (Pee)",   "7"),   # Peacock
-    "diaper_poop":   ("💩 Diaper (Poop)",  "8"),   # Graphite
-    "sleep":         ("😴 Sleep",          "9"),   # Blueberry
-    "breastfeeding": ("🤱 Breastfeeding",  "4"),   # Flamingo
-    "pump":          ("🥛 Pump",           "6"),   # Tangerine
-    "help":          ("❓ Help",           "1"),   # Lavender
+    "bottle": ("🍼 Bottle", "5"),
+    "food": ("🥄 Food", "2"),
+    "diaper_pee": ("💧 Diaper (Pee)", "7"),
+    "diaper_poop": ("💩 Diaper (Poop)", "8"),
+    "sleep": ("😴 Sleep", "9"),
+    "breastfeeding": ("🤱 Breastfeeding", "4"),
+    "pump": ("🥛 Pump", "6"),
+    "help": ("❓ Help", "1"),
 }
 
 ACTIVITY_TYPE_ALIASES: dict[str, str] = {
@@ -42,59 +33,22 @@ ACTIVITY_TYPE_ALIASES: dict[str, str] = {
     "other": "help",
 }
 
-# Minimum event duration for instant-tap events (Google Calendar requires a non-zero span)
 INSTANT_EVENT_DURATION_MINUTES = 5
 
 
 def normalize_activity_type(activity_type: str) -> str:
-    """Map legacy/frontend activity identifiers onto the canonical calendar IDs."""
     return ACTIVITY_TYPE_ALIASES.get(activity_type, activity_type)
 
 
 class CalendarService:
-    """Wraps the Google Calendar API for Baby Tracker event creation."""
+    """Wraps the Google Calendar API for calendar provisioning and event sync."""
 
-    def __init__(self, credentials_path: str, calendar_id: str) -> None:
+    def __init__(self, credentials_path: str, calendar_id: Optional[str] = None) -> None:
         self.credentials_path = credentials_path
         self.calendar_id = calendar_id
-        self._service = None  # lazy-initialised
+        self._service = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def create_event_from_baby_event(self, event) -> dict:
-        """
-        Create a Google Calendar event from a baby tracker Event/dict-like object.
-
-        Accepts either a SQLModel Event instance or any object/dict with the
-        fields: type, start_time, end_time, duration, details.
-        """
-        if isinstance(event, dict):
-            event_type  = event.get("type", "unknown")
-            start_time  = event.get("start_time") or datetime.now(timezone.utc)
-            end_time    = event.get("end_time")
-            duration    = event.get("duration")
-            details     = event.get("details")
-        else:
-            event_type  = getattr(event, "type", "unknown")
-            start_time  = getattr(event, "start_time", datetime.now(timezone.utc))
-            end_time    = getattr(event, "end_time", None)
-            duration    = getattr(event, "duration", None)
-            details     = getattr(event, "details", None)
-
-        body = self.build_event_body(
-            event_type=event_type,
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            details=details,
-        )
-
-        return self.create_event(body=body)
-
-    def update_event_from_baby_event(self, calendar_event_id: str, event) -> dict:
-        """Update an existing Google Calendar event from a baby tracker Event."""
+    def create_event_from_baby_event(self, event, calendar_id: Optional[str] = None) -> dict:
         if isinstance(event, dict):
             event_type = event.get("type", "unknown")
             start_time = event.get("start_time") or datetime.now(timezone.utc)
@@ -115,8 +69,30 @@ class CalendarService:
             duration=duration,
             details=details,
         )
+        return self.create_event(body=body, calendar_id=calendar_id)
 
-        return self.update_event(calendar_event_id=calendar_event_id, body=body)
+    def update_event_from_baby_event(self, calendar_event_id: str, event, calendar_id: Optional[str] = None) -> dict:
+        if isinstance(event, dict):
+            event_type = event.get("type", "unknown")
+            start_time = event.get("start_time") or datetime.now(timezone.utc)
+            end_time = event.get("end_time")
+            duration = event.get("duration")
+            details = event.get("details")
+        else:
+            event_type = getattr(event, "type", "unknown")
+            start_time = getattr(event, "start_time", datetime.now(timezone.utc))
+            end_time = getattr(event, "end_time", None)
+            duration = getattr(event, "duration", None)
+            details = getattr(event, "details", None)
+
+        body = self.build_event_body(
+            event_type=event_type,
+            start_time=start_time,
+            end_time=end_time,
+            duration=duration,
+            details=details,
+        )
+        return self.update_event(calendar_event_id=calendar_event_id, body=body, calendar_id=calendar_id)
 
     def build_event_body(
         self,
@@ -126,18 +102,12 @@ class CalendarService:
         duration: Optional[int] = None,
         details: Optional[str] = None,
     ) -> dict:
-        """Build a Google Calendar event payload from a baby tracker event."""
         normalized_type = normalize_activity_type(event_type)
-        label, color_id = ACTIVITY_META.get(
-            normalized_type,
-            (f"🍼 {normalized_type.title()}", "1"),
-        )
+        label, color_id = ACTIVITY_META.get(normalized_type, (f"🍼 {normalized_type.title()}", "1"))
 
-        # Ensure start_time is timezone-aware
         if isinstance(start_time, datetime) and start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)
 
-        # Determine end_time
         if end_time is not None:
             if isinstance(end_time, datetime) and end_time.tzinfo is None:
                 end_time = end_time.replace(tzinfo=timezone.utc)
@@ -156,8 +126,8 @@ class CalendarService:
 
         body: dict = {
             "summary": label,
-            "start": {"dateTime": start_time.isoformat(), "timeZone": "UTC"},
-            "end": {"dateTime": end_time.isoformat(), "timeZone": "UTC"},
+            "start": {"dateTime": start_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
+            "end": {"dateTime": end_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
         }
         if description:
             body["description"] = description
@@ -173,70 +143,109 @@ class CalendarService:
         end_time: Optional[datetime] = None,
         description: Optional[str] = None,
         color_id: Optional[str] = None,
+        calendar_id: Optional[str] = None,
     ) -> dict:
-        """
-        Create a single Google Calendar event and return the API response.
-
-        Raises googleapiclient.errors.HttpError on API failures.
-        """
         if body is None:
             if summary is None or start_time is None or end_time is None:
                 raise ValueError("summary, start_time, and end_time are required when body is not provided")
             body = {
                 "summary": summary,
-                "start": {"dateTime": start_time.isoformat(), "timeZone": "UTC"},
-                "end": {"dateTime": end_time.isoformat(), "timeZone": "UTC"},
+                "start": {"dateTime": start_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
+                "end": {"dateTime": end_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
             }
             if description:
                 body["description"] = description
             if color_id:
                 body["colorId"] = color_id
 
+        resolved_calendar_id = self._resolve_calendar_id(calendar_id)
         service = self._get_service()
-        result = (
-            service.events()
-            .insert(calendarId=self.calendar_id, body=body)
-            .execute()
-        )
+        result = service.events().insert(calendarId=resolved_calendar_id, body=body).execute()
         logger.info("Calendar event created: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
-    def update_event(self, calendar_event_id: str, body: dict) -> dict:
-        """Update a single Google Calendar event and return the API response."""
+    def update_event(self, calendar_event_id: str, body: dict, calendar_id: Optional[str] = None) -> dict:
+        resolved_calendar_id = self._resolve_calendar_id(calendar_id)
         service = self._get_service()
         result = (
             service.events()
-            .update(calendarId=self.calendar_id, eventId=calendar_event_id, body=body)
+            .update(calendarId=resolved_calendar_id, eventId=calendar_event_id, body=body)
             .execute()
         )
         logger.info("Calendar event updated: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
-    def verify_calendar_access(self) -> bool:
-        """
-        Confirm the service account can reach the target calendar.
-        Returns True on success, raises on failure.
-
-        Uses events.list (compatible with calendar.events scope).
-        """
+    def delete_event(self, calendar_event_id: str, calendar_id: Optional[str] = None) -> None:
+        resolved_calendar_id = self._resolve_calendar_id(calendar_id)
         service = self._get_service()
-        response = (
-            service.events()
-            .list(calendarId=self.calendar_id, maxResults=1)
+        service.events().delete(calendarId=resolved_calendar_id, eventId=calendar_event_id).execute()
+        logger.info("Calendar event deleted: %s from %s", calendar_event_id, resolved_calendar_id)
+
+    def create_calendar(self, summary: str, description: Optional[str] = None, time_zone: str = CALENDAR_TIME_ZONE) -> dict:
+        body = {"summary": summary, "timeZone": time_zone}
+        if description:
+            body["description"] = description
+        service = self._get_service()
+        result = service.calendars().insert(body=body).execute()
+        logger.info("Calendar provisioned: %s (%s)", result.get("summary"), result.get("id"))
+        return result
+
+    def update_calendar_metadata(
+        self,
+        calendar_id: str,
+        summary: str,
+        description: Optional[str] = None,
+        time_zone: str = CALENDAR_TIME_ZONE,
+    ) -> dict:
+        body = {"summary": summary, "timeZone": time_zone}
+        if description:
+            body["description"] = description
+        service = self._get_service()
+        result = service.calendars().update(calendarId=calendar_id, body=body).execute()
+        logger.info("Calendar metadata updated: %s (%s)", result.get("summary"), result.get("id"))
+        return result
+
+    def share_calendar(
+        self,
+        calendar_id: str,
+        email: str,
+        role: str = CALENDAR_SHARE_ROLE,
+        send_notifications: bool = True,
+    ) -> dict:
+        body = {
+            "role": role,
+            "scope": {"type": "user", "value": email},
+        }
+        service = self._get_service()
+        result = (
+            service.acl()
+            .insert(
+                calendarId=calendar_id,
+                body=body,
+                sendNotifications=send_notifications,
+            )
             .execute()
         )
-        logger.info("Calendar access verified; kind=%s", response.get("kind"))
+        logger.info("Calendar shared: %s -> %s", calendar_id, email)
+        return result
+
+    def verify_calendar_access(self, calendar_id: Optional[str] = None) -> bool:
+        resolved_calendar_id = self._resolve_calendar_id(calendar_id)
+        service = self._get_service()
+        service.events().list(calendarId=resolved_calendar_id, maxResults=1).execute()
         return True
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def _resolve_calendar_id(self, calendar_id: Optional[str]) -> str:
+        resolved = calendar_id or self.calendar_id
+        if not resolved:
+            raise ValueError("calendar_id is required")
+        return resolved
 
     def _get_service(self):
-        """Lazily build and cache the Google Calendar API service client."""
         if self._service is None:
             creds = service_account.Credentials.from_service_account_file(
-                self.credentials_path, scopes=SCOPES
+                self.credentials_path,
+                scopes=SCOPES,
             )
             self._service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return self._service
