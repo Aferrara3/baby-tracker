@@ -47,6 +47,7 @@ import {
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
 const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
 const NOTE_SHEET_AUTO_DISMISS_MS = 5000;
+const TRACKER_BUTTON_AUTOSAVE_DELAY_MS = 600;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 interface Activity {
@@ -95,6 +96,22 @@ interface EventSummary {
 interface PendingLogItem {
   eventId: number;
   activityId: string;
+}
+
+function buildTrackerButtonsPayload(buttons: TrackerButtonConfig[]) {
+  return {
+    buttons: sortTrackerButtons(buttons).map((button, position) => ({
+      id: button.id,
+      label: button.label.trim(),
+      icon_key: button.icon_key,
+      color_key: button.color_key,
+      position,
+    })),
+  };
+}
+
+function serializeTrackerButtonsPayload(buttons: TrackerButtonConfig[]) {
+  return JSON.stringify(buildTrackerButtonsPayload(buttons).buttons);
 }
 
 function parseEmails(input: string): string[] {
@@ -171,8 +188,14 @@ export default function App() {
   const [selectedButtonId, setSelectedButtonId] = useState(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
   const [symbolSearch, setSymbolSearch] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [isSavingButtons, setIsSavingButtons] = useState(false);
+  const [buttonsSaveError, setButtonsSaveError] = useState<string | null>(null);
   const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
+  const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
+  const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
+  const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
+  const buttonsSaveRequestIdRef = useRef(0);
   const dragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -213,6 +236,11 @@ export default function App() {
   }, [availableSymbols, symbolSearch]);
   const activePendingLog = pendingLogs[0] ?? null;
   const pendingActivityLabel = activities.find((activity) => activity.id === activePendingLog?.activityId)?.label ?? 'event';
+  const serializedSettingsButtonsDraft = useMemo(
+    () => serializeTrackerButtonsPayload(settingsButtonsDraft),
+    [settingsButtonsDraft],
+  );
+  const buttonsHaveUnsavedChanges = serializedSettingsButtonsDraft !== savedButtonsPayloadRef.current;
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now().toString();
@@ -245,6 +273,15 @@ export default function App() {
     setAvailableSymbols(DEFAULT_TRACKER_SYMBOLS);
     setSelectedButtonId(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
     setSymbolSearch('');
+    setIsSavingButtons(false);
+    setButtonsSaveError(null);
+    if (buttonsAutosaveTimeoutRef.current !== null) {
+      window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+      buttonsAutosaveTimeoutRef.current = null;
+    }
+    const defaultButtonsPayload = serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS);
+    latestButtonsPayloadRef.current = defaultButtonsPayload;
+    savedButtonsPayloadRef.current = defaultButtonsPayload;
   }, []);
 
   const hideInteractionTip = useCallback(() => {
@@ -275,10 +312,14 @@ export default function App() {
           trackerButtonsResponse.data.buttons,
           trackerButtonsResponse.data.available_symbols,
         );
+        const nextButtonsPayload = serializeTrackerButtonsPayload(nextButtons);
         setTrackerButtons(nextButtons);
         setSettingsButtonsDraft(nextButtons);
         setAvailableSymbols(trackerButtonsResponse.data.available_symbols);
         setSelectedButtonId(nextButtons[0]?.id ?? 'bottle');
+        setButtonsSaveError(null);
+        latestButtonsPayloadRef.current = nextButtonsPayload;
+        savedButtonsPayloadRef.current = nextButtonsPayload;
       } catch {
         clearAuth();
       } finally {
@@ -445,43 +486,98 @@ export default function App() {
     });
   }, []);
 
-  const handleSaveButtons = async () => {
+  const handleSaveButtons = useCallback(async (buttonsToSave: TrackerButtonConfig[], showSuccessToast = false) => {
     if (!authHeaders) {
       return;
     }
 
-    setIsBusy(true);
+    if (buttonsAutosaveTimeoutRef.current !== null) {
+      window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+      buttonsAutosaveTimeoutRef.current = null;
+    }
+
+    const payload = buildTrackerButtonsPayload(buttonsToSave);
+    const payloadKey = JSON.stringify(payload.buttons);
+    if (payloadKey === savedButtonsPayloadRef.current) {
+      setButtonsSaveError(null);
+      return;
+    }
+
+    const requestId = buttonsSaveRequestIdRef.current + 1;
+    buttonsSaveRequestIdRef.current = requestId;
+    setIsSavingButtons(true);
+    setButtonsSaveError(null);
+
     try {
-      const payload = {
-        buttons: sortTrackerButtons(settingsButtonsDraft).map((button, position) => ({
-          id: button.id,
-          label: button.label.trim(),
-          icon_key: button.icon_key,
-          color_key: button.color_key,
-          position,
-        })),
-      };
       const response = await axios.patch<TrackerButtonsResponse>(`${API_BASE}/tracker-buttons`, payload, {
         headers: authHeaders,
       });
       const nextButtons = normalizeTrackerButtons(response.data.buttons, response.data.available_symbols);
-      setTrackerButtons(nextButtons);
-      setSettingsButtonsDraft(nextButtons);
-      setAvailableSymbols(response.data.available_symbols);
-      setSelectedButtonId((current) => {
-        if (nextButtons.some((button) => button.id === current)) {
-          return current;
-        }
-        return nextButtons[0]?.id ?? 'bottle';
-      });
-      addToast('Buttons saved', 'success');
+      savedButtonsPayloadRef.current = payloadKey;
+
+      if (latestButtonsPayloadRef.current === payloadKey) {
+        setTrackerButtons(nextButtons);
+        setSettingsButtonsDraft(nextButtons);
+        setAvailableSymbols(response.data.available_symbols);
+        setSelectedButtonId((current) => {
+          if (nextButtons.some((button) => button.id === current)) {
+            return current;
+          }
+          return nextButtons[0]?.id ?? 'bottle';
+        });
+      }
+
+      if (showSuccessToast) {
+        addToast('Buttons saved', 'success');
+      }
     } catch (error) {
-      addToast('Failed to save buttons', 'error');
+      if (latestButtonsPayloadRef.current === payloadKey) {
+        setButtonsSaveError('Failed to save changes');
+        addToast('Failed to save buttons', 'error');
+      }
       console.error('Tracker button settings error:', error);
     } finally {
-      setIsBusy(false);
+      if (requestId === buttonsSaveRequestIdRef.current) {
+        setIsSavingButtons(false);
+      }
     }
-  };
+  }, [addToast, authHeaders]);
+
+  useEffect(() => {
+    latestButtonsPayloadRef.current = serializedSettingsButtonsDraft;
+  }, [serializedSettingsButtonsDraft]);
+
+  useEffect(() => {
+    if (!authHeaders) {
+      return undefined;
+    }
+
+    const payloadChanged = latestButtonsPayloadRef.current !== savedButtonsPayloadRef.current;
+    if (!payloadChanged) {
+      setButtonsSaveError(null);
+      if (buttonsAutosaveTimeoutRef.current !== null) {
+        window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+        buttonsAutosaveTimeoutRef.current = null;
+      }
+      return undefined;
+    }
+
+    if (buttonsAutosaveTimeoutRef.current !== null) {
+      window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+    }
+
+    buttonsAutosaveTimeoutRef.current = window.setTimeout(() => {
+      buttonsAutosaveTimeoutRef.current = null;
+      void handleSaveButtons(settingsButtonsDraft);
+    }, TRACKER_BUTTON_AUTOSAVE_DELAY_MS);
+
+    return () => {
+      if (buttonsAutosaveTimeoutRef.current !== null) {
+        window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+        buttonsAutosaveTimeoutRef.current = null;
+      }
+    };
+  }, [authHeaders, handleSaveButtons, serializedSettingsButtonsDraft, settingsButtonsDraft]);
 
   const handleUndoPendingLog = useCallback(async () => {
     if (!activePendingLog || !authHeaders) {
@@ -1071,7 +1167,7 @@ export default function App() {
                   <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
                     <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Tracked buttons</h3>
                     <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                      Drag to reorder. Click on a button to edit the label or icon below!
+                      Drag to reorder. Click a button to edit its label or icon below. Changes save automatically.
                     </p>
                   </div>
 
@@ -1163,13 +1259,17 @@ export default function App() {
                           </p>
                         )}
 
-                        <button
-                          onClick={() => void handleSaveButtons()}
-                          disabled={isBusy}
-                          className="w-full rounded-2xl bg-slate-900 dark:bg-slate-100 px-4 py-3 font-semibold text-white dark:text-slate-900 disabled:opacity-60"
-                        >
-                          Save buttons
-                        </button>
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-700 dark:bg-slate-800/40">
+                          <p className={clsx('text-slate-500 dark:text-slate-400', buttonsSaveError && 'text-rose-600 dark:text-rose-400')}>
+                            {buttonsSaveError
+                              ? buttonsSaveError
+                              : isSavingButtons
+                                ? 'Saving changes...'
+                                : buttonsHaveUnsavedChanges
+                                  ? 'Saving automatically...'
+                                  : 'Saved automatically.'}
+                          </p>
+                        </div>
                       </div>
                     )}
                   </div>
