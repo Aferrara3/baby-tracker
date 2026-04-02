@@ -11,6 +11,7 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Undo2,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -23,7 +24,7 @@ import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
 const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
-const NOTE_SHEET_AUTO_DISMISS_MS = 8000;
+const NOTE_SHEET_AUTO_DISMISS_MS = 5000;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 interface Activity {
@@ -58,6 +59,22 @@ interface AuthResponse {
   account: Account;
 }
 
+interface EventSummary {
+  id: number;
+  type: string;
+  title: string | null;
+  start_time: string;
+  end_time: string | null;
+  duration: number | null;
+  details: string | null;
+  is_active: boolean;
+}
+
+interface PendingLogItem {
+  eventId: number;
+  activityId: string;
+}
+
 const ACTIVITIES: Activity[] = [
   { id: 'bottle', icon: BottleWine, label: 'Bottle', colorClass: 'bg-gradient-to-br from-blue-400 to-blue-600 dark:from-blue-500 dark:to-blue-700 shadow-blue-200 dark:shadow-blue-900/30' },
   { id: 'food', icon: Utensils, label: 'Food', colorClass: 'bg-gradient-to-br from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700 shadow-amber-200 dark:shadow-amber-900/30' },
@@ -89,10 +106,10 @@ export default function App() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [registerBabyName, setRegisterBabyName] = useState('');
-  const [runningActivity, setRunningActivity] = useState<{ id: string; startTime: number } | null>(null);
+  const [runningActivities, setRunningActivities] = useState<Record<string, number>>({});
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   const [inputValue, setInputValue] = useState('');
-  const [showInput, setShowInput] = useState(false);
-  const [pendingLog, setPendingLog] = useState<{ eventId: number; activityId: string } | null>(null);
+  const [pendingLogs, setPendingLogs] = useState<PendingLogItem[]>([]);
   const [activeView, setActiveView] = useState<'tracker' | 'settings'>('tracker');
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
@@ -104,7 +121,8 @@ export default function App() {
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
   );
-  const pendingActivityLabel = ACTIVITIES.find((activity) => activity.id === pendingLog?.activityId)?.label ?? 'event';
+  const activePendingLog = pendingLogs[0] ?? null;
+  const pendingActivityLabel = ACTIVITIES.find((activity) => activity.id === activePendingLog?.activityId)?.label ?? 'event';
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now().toString();
@@ -127,9 +145,8 @@ export default function App() {
     setToken('');
     setAccount(null);
     setActiveView('tracker');
-    setRunningActivity(null);
-    setShowInput(false);
-    setPendingLog(null);
+    setRunningActivities({});
+    setPendingLogs([]);
     setInputValue('');
   };
 
@@ -162,21 +179,61 @@ export default function App() {
     void fetchAccount();
   }, [authHeaders, token]);
 
+  const refreshRunningActivities = useCallback(async () => {
+    if (!authHeaders) {
+      setRunningActivities({});
+      return;
+    }
+
+    const response = await axios.get<EventSummary[]>(`${API_BASE}/events`, {
+      headers: authHeaders,
+    });
+
+    setRunningActivities(
+      response.data.reduce<Record<string, number>>((next, event) => {
+        if (event.is_active) {
+          next[event.type] = new Date(event.start_time).getTime();
+        }
+        return next;
+      }, {}),
+    );
+  }, [authHeaders]);
+
+  useEffect(() => {
+    if (!authHeaders) {
+      setRunningActivities({});
+      return;
+    }
+
+    void refreshRunningActivities();
+  }, [authHeaders, refreshRunningActivities]);
+
+  useEffect(() => {
+    if (Object.keys(runningActivities).length === 0) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [runningActivities]);
+
   const finalizePendingEvent = useCallback(async (details?: string) => {
-    if (!pendingLog || !authHeaders) {
+    if (!activePendingLog || !authHeaders) {
       return;
     }
 
     await axios.post(
-      `${API_BASE}/events/${pendingLog.eventId}/finalize`,
+      `${API_BASE}/events/${activePendingLog.eventId}/finalize`,
       details !== undefined ? { details } : {},
       { headers: authHeaders },
     );
-  }, [authHeaders, pendingLog]);
+  }, [activePendingLog, authHeaders]);
 
   const resetPendingInput = useCallback(() => {
-    setShowInput(false);
-    setPendingLog(null);
+    setPendingLogs((prev) => prev.slice(1));
     setInputValue('');
   }, []);
 
@@ -235,6 +292,24 @@ export default function App() {
       setSettingsShareEmails(response.data.share_emails.join(', '));
     }
   }, [authHeaders]);
+
+  const handleUndoPendingLog = useCallback(async () => {
+    if (!activePendingLog || !authHeaders) {
+      return;
+    }
+
+    try {
+      await axios.delete(`${API_BASE}/events/${activePendingLog.eventId}`, {
+        headers: authHeaders,
+      });
+      addToast('Event undone', 'info');
+      resetPendingInput();
+      await refreshAccount();
+    } catch (error) {
+      addToast('Failed to undo event', 'error');
+      console.error('Undo event error:', error);
+    }
+  }, [activePendingLog, addToast, authHeaders, refreshAccount, resetPendingInput]);
 
   const saveSettingsRequest = async () => {
     if (!authHeaders) {
@@ -360,7 +435,9 @@ export default function App() {
         headers: authHeaders,
         params: { time_zone: BROWSER_TIME_ZONE },
       });
-      setRunningActivity(null);
+      setRunningActivities({});
+      setPendingLogs([]);
+      setInputValue('');
       addToast(`Deleted ${response.data.deleted_count} event(s) for today`, 'success');
     } catch (error) {
       addToast('Failed to clear today', 'error');
@@ -397,7 +474,7 @@ export default function App() {
     }
 
     try {
-      const response = await axios.post(
+      const response = await axios.post<EventSummary>(
         `${API_BASE}/events`,
         {
           type: activityId,
@@ -406,8 +483,7 @@ export default function App() {
         { headers: authHeaders },
       );
       addToast('Event logged', 'success');
-      setPendingLog({ eventId: response.data.id, activityId });
-      setShowInput(true);
+      setPendingLogs((prev) => [...prev, { eventId: response.data.id, activityId }]);
     } catch (error) {
       addToast('Failed to log event', 'error');
       console.error('Event logging error:', error);
@@ -419,18 +495,31 @@ export default function App() {
       return;
     }
 
-    if (runningActivity?.id === activityId) {
+    if (runningActivities[activityId]) {
       try {
-        const response = await axios.post(
+        const response = await axios.post<{
+          status: 'success' | 'error';
+          message: string;
+          event_id?: number;
+          duration_seconds?: number;
+        }>(
           `${API_BASE}/activities/stop`,
           { type: activityId },
           { headers: authHeaders },
         );
+        if (response.data.status !== 'success' || response.data.event_id === undefined || response.data.duration_seconds === undefined) {
+          addToast(response.data.message || 'Failed to stop activity', 'error');
+          return;
+        }
+        const { event_id: eventId, duration_seconds: durationSeconds } = response.data;
         hideInteractionTip();
-        addToast(`Stopped (${formatDuration(response.data.duration_seconds)})`, 'success');
-        setRunningActivity(null);
-        setPendingLog({ eventId: response.data.event_id, activityId });
-        setShowInput(true);
+        addToast(`Stopped (${formatDuration(durationSeconds)})`, 'success');
+        setRunningActivities((prev) => {
+          const next = { ...prev };
+          delete next[activityId];
+          return next;
+        });
+        setPendingLogs((prev) => [...prev, { eventId, activityId }]);
       } catch (error) {
         addToast('Failed to stop activity', 'error');
         console.error('Stop activity error:', error);
@@ -439,9 +528,22 @@ export default function App() {
     }
 
     try {
-      await axios.post(`${API_BASE}/activities/start`, { type: activityId }, { headers: authHeaders });
+      const response = await axios.post<{
+        status: 'success' | 'error';
+        message: string;
+        start_time?: string;
+      }>(`${API_BASE}/activities/start`, { type: activityId }, { headers: authHeaders });
+      if (response.data.status !== 'success' || !response.data.start_time) {
+        addToast(response.data.message || 'Failed to start activity', 'error');
+        return;
+      }
+      const { start_time: startTime } = response.data;
       hideInteractionTip();
-      setRunningActivity({ id: activityId, startTime: Date.now() });
+      setCurrentTime(Date.now());
+      setRunningActivities((prev) => ({
+        ...prev,
+        [activityId]: new Date(startTime).getTime(),
+      }));
     } catch (error) {
       addToast('Failed to start activity', 'error');
       console.error('Start activity error:', error);
@@ -493,7 +595,7 @@ export default function App() {
   }, [authHeaders, account?.calendar_connected, account?.google_calendar_id, runGoogleSync]);
 
   useEffect(() => {
-    if (!showInput || !pendingLog || inputValue.trim()) {
+    if (!activePendingLog || inputValue.trim()) {
       return undefined;
     }
 
@@ -502,7 +604,7 @@ export default function App() {
     }, NOTE_SHEET_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [handleInputDismiss, inputValue, pendingLog, showInput]);
+  }, [activePendingLog, handleInputDismiss, inputValue]);
 
   if (authLoading) {
     return <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-700">Loading…</div>;
@@ -772,9 +874,11 @@ export default function App() {
             <div className="grid flex-1 min-h-0 content-start justify-items-center gap-x-4 gap-y-4 pt-1 sm:content-center md:grid-cols-4 md:gap-x-6 md:gap-y-8 grid-cols-2">
               {ACTIVITIES.map((activity) => (
                 <ActivityButton
-                  key={`${activity.id}-${runningActivity?.id === activity.id ? runningActivity.startTime : 'idle'}`}
+                  key={`${activity.id}-${runningActivities[activity.id] ?? 'idle'}`}
                   activity={activity}
-                  isRunning={runningActivity?.id === activity.id}
+                  isRunning={Boolean(runningActivities[activity.id])}
+                  runningSince={runningActivities[activity.id] ?? null}
+                  currentTime={currentTime}
                   onTap={() => void handleTap(activity.id)}
                   onLongPress={() => void handleLongPress(activity.id)}
                 />
@@ -786,10 +890,10 @@ export default function App() {
         <div
           className={clsx(
             'fixed inset-0 z-50 flex items-end justify-center bg-slate-950/10 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-300',
-            showInput ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+            activePendingLog ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
           )}
           onClick={() => {
-            if (showInput) {
+            if (activePendingLog) {
               void handleInputDismiss();
             }
           }}
@@ -797,23 +901,31 @@ export default function App() {
           <div
             className={clsx(
               'w-full max-w-sm rounded-3xl border border-slate-100 bg-white p-4 shadow-2xl ring-1 ring-black/5 transition-transform duration-500 ease-spring dark:border-slate-700 dark:bg-slate-800',
-              showInput ? 'translate-y-0' : 'translate-y-[120%]',
+              activePendingLog ? 'translate-y-0' : 'translate-y-[120%]',
             )}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Add a note?</p>
-                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  Optional for {pendingActivityLabel}. Auto-skips in {Math.floor(NOTE_SHEET_AUTO_DISMISS_MS / 1000)}s.
-                </p>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{pendingActivityLabel} · auto-skip {Math.floor(NOTE_SHEET_AUTO_DISMISS_MS / 1000)}s</p>
               </div>
-              <button
-                onClick={() => void handleInputDismiss()}
-                className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
-              >
-                Skip
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => void handleUndoPendingLog()}
+                  className="rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                  aria-label="Undo event"
+                  title="Undo event"
+                >
+                  <Undo2 size={16} />
+                </button>
+                <button
+                  onClick={() => void handleInputDismiss()}
+                  className="rounded-xl px-2.5 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                >
+                  Skip
+                </button>
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -823,7 +935,7 @@ export default function App() {
                 onChange={(event) => setInputValue(event.target.value)}
                 placeholder={`Add note for ${pendingActivityLabel}...`}
                 className="min-w-0 flex-1 bg-slate-100 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-slate-400"
-                autoFocus={showInput}
+                autoFocus={Boolean(activePendingLog)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     void handleInputSubmit();

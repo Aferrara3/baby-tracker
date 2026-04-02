@@ -114,11 +114,9 @@ def client(tmp_path):
     test_engine = create_engine(f"sqlite:///{database_path}", connect_args={"check_same_thread": False})
 
     old_engine = main.engine
-    old_timers = main.active_timers
     old_service = main._calendar_service
 
     main.engine = test_engine
-    main.active_timers = {}
     main._calendar_service = FakeCalendarService()
 
     SQLModel.metadata.create_all(main.engine)
@@ -128,7 +126,6 @@ def client(tmp_path):
         yield test_client
 
     main.engine = old_engine
-    main.active_timers = old_timers
     main._calendar_service = old_service
 
 
@@ -217,6 +214,77 @@ def test_timers_are_scoped_per_account(client: TestClient):
     assert stop_one.json()["status"] == "success"
     assert stop_two.json()["status"] == "success"
     assert stop_one.json()["event_id"] != stop_two.json()["event_id"]
+    assert datetime.fromisoformat(start_one.json()["start_time"]).tzinfo is not None
+    assert datetime.fromisoformat(stop_one.json()["end_time"]).tzinfo is not None
+
+
+def test_multiple_activity_timers_can_run_concurrently_for_one_account(client: TestClient):
+    data = register(client, "multi-timer", "secret123")
+    headers = auth_headers(data["token"])
+
+    sleep_start = client.post("/activities/start", headers=headers, json={"type": "sleep"})
+    bottle_start = client.post("/activities/start", headers=headers, json={"type": "bottle"})
+
+    assert sleep_start.status_code == 200
+    assert bottle_start.status_code == 200
+    assert sleep_start.json()["status"] == "success"
+    assert bottle_start.json()["status"] == "success"
+
+    events = client.get("/events", headers=headers)
+    payload = events.json()
+    active_types = {event["type"] for event in payload if event["is_active"]}
+    assert active_types == {"sleep", "bottle"}
+
+    sleep_stop = client.post("/activities/stop", headers=headers, json={"type": "sleep"})
+    assert sleep_stop.status_code == 200
+    assert sleep_stop.json()["status"] == "success"
+
+    after_first_stop = client.get("/events", headers=headers).json()
+    sleep_event = next(event for event in after_first_stop if event["id"] == sleep_stop.json()["event_id"])
+    bottle_event = next(event for event in after_first_stop if event["type"] == "bottle")
+    assert sleep_event["is_active"] is False
+    assert sleep_event["end_time"] is not None
+    assert bottle_event["is_active"] is True
+
+    bottle_stop = client.post("/activities/stop", headers=headers, json={"type": "bottle"})
+    assert bottle_stop.status_code == 200
+    assert bottle_stop.json()["status"] == "success"
+
+
+def test_stop_syncs_started_timer_and_finalize_updates_same_calendar_event(client: TestClient):
+    data = register(client, "timer-sync", "secret123")
+    headers = auth_headers(data["token"])
+    enabled = client.post("/calendar/enable-sync", headers=headers)
+    assert enabled.status_code == 200
+
+    started = client.post("/activities/start", headers=headers, json={"type": "sleep"})
+    assert started.status_code == 200
+    assert started.json()["status"] == "success"
+
+    active_events = client.get("/events", headers=headers)
+    assert active_events.status_code == 200
+    active_event = active_events.json()[0]
+    assert active_event["is_active"] is True
+    assert active_event["end_time"] is None
+
+    stopped = client.post("/activities/stop", headers=headers, json={"type": "sleep"})
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "success"
+
+    fake_service = main.get_calendar_service()
+    assert len(fake_service.created_events) == 1
+    assert fake_service.created_events[0]["type"] == "sleep"
+
+    finalized = client.post(
+        f"/events/{stopped.json()['event_id']}/finalize",
+        headers=headers,
+        json={"details": "solid nap"},
+    )
+    assert finalized.status_code == 200
+
+    assert len(fake_service.created_events) == 1
+    assert len(fake_service.updated_events) == 1
+    assert fake_service.updated_events[0]["details"] == "solid nap"
 
 
 def test_enable_sync_provisions_calendar_and_shares_to_saved_emails(client: TestClient):
@@ -326,6 +394,38 @@ def test_existing_synced_event_updates_same_calendar_event(client: TestClient):
     assert len(fake_service.created_events) == 1
     assert len(fake_service.updated_events) == 1
     assert fake_service.updated_events[0]["details"] == "puree + yogurt"
+
+
+def test_delete_single_event_removes_synced_google_event(client: TestClient):
+    data = register(client, "undo-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "food", "start_time": datetime.now(timezone.utc).isoformat()},
+    )
+    assert created.status_code == 200
+
+    finalized = client.post(
+        f"/events/{created.json()['id']}/finalize",
+        headers=headers,
+        json={"details": "temporary"},
+    )
+    assert finalized.status_code == 200
+
+    deleted = client.delete(f"/events/{created.json()['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["status"] == "success"
+
+    remaining = client.get("/events", headers=headers)
+    assert remaining.status_code == 200
+    assert remaining.json() == []
+
+    fake_service = main.get_calendar_service()
+    assert len(fake_service.deleted_events) == 1
+    assert fake_service.deleted_events[0]["calendar_id"] == "calendar-1"
 
 
 def test_delete_events_for_day_is_user_scoped_and_removes_calendar_events(client: TestClient):

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
@@ -10,6 +10,8 @@ interface ActivityButtonProps {
     colorClass: string;
   };
   isRunning: boolean;
+  runningSince: number | null;
+  currentTime: number;
   onTap: () => void;
   onLongPress: () => void;
 }
@@ -17,27 +19,16 @@ interface ActivityButtonProps {
 export default function ActivityButton({
   activity,
   isRunning,
+  runningSince,
+  currentTime,
   onTap,
   onLongPress,
 }: ActivityButtonProps) {
   const [isPressed, setIsPressed] = useState(false);
   const pressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
-  const [timerDuration, setTimerDuration] = useState(0);
 
   const Icon = activity.icon;
-
-  useEffect(() => {
-    if (!isRunning) {
-      return undefined;
-    }
-
-    const interval = setInterval(() => {
-      setTimerDuration((value) => value + 1);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isRunning]);
 
   const startPress = () => {
     setIsPressed(true);
@@ -67,6 +58,10 @@ export default function ActivityButton({
     }
     return `${minutes}:${secs.toString().padStart(2, '0')}`;
   };
+
+  const timerDuration = isRunning && runningSince
+    ? Math.max(0, Math.floor((currentTime - runningSince) / 1000))
+    : 0;
 
   return (
     <div className="flex flex-col items-center gap-2 md:gap-3">

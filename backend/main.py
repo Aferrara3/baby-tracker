@@ -107,6 +107,7 @@ class Event(SQLModel, table=True):
     end_time: Optional[datetime] = None
     duration: Optional[int] = None
     details: Optional[str] = None
+    is_active: bool = False
     google_description: Optional[str] = None
     calendar_event_id: Optional[str] = None
     calendar_synced_at: Optional[datetime] = None
@@ -166,6 +167,7 @@ class EventResponse(SQLModel):
     end_time: Optional[datetime]
     duration: Optional[int]
     details: Optional[str]
+    is_active: bool
 
 
 class DayActionResponse(SQLModel):
@@ -220,7 +222,6 @@ app.add_middleware(
 )
 
 _calendar_service: Optional[CalendarService] = None
-active_timers: dict[int, dict[str, dict]] = {}
 
 
 def get_calendar_service() -> CalendarService:
@@ -240,6 +241,7 @@ def _ensure_column(table_name: str, column_name: str, ddl: str) -> None:
 def _ensure_event_columns() -> None:
     _ensure_column("event", "account_id", "ALTER TABLE event ADD COLUMN account_id INTEGER")
     _ensure_column("event", "title", "ALTER TABLE event ADD COLUMN title VARCHAR")
+    _ensure_column("event", "is_active", "ALTER TABLE event ADD COLUMN is_active BOOLEAN DEFAULT 0")
     _ensure_column("event", "google_description", "ALTER TABLE event ADD COLUMN google_description VARCHAR")
     _ensure_column("event", "calendar_event_id", "ALTER TABLE event ADD COLUMN calendar_event_id VARCHAR")
     _ensure_column("event", "calendar_synced_at", "ALTER TABLE event ADD COLUMN calendar_synced_at DATETIME")
@@ -383,6 +385,7 @@ def _event_response(event: Event) -> EventResponse:
         end_time=_ensure_utc(event.end_time) if event.end_time else None,
         duration=event.duration,
         details=event.details,
+        is_active=event.is_active,
     )
 
 
@@ -469,8 +472,16 @@ def _sync_event_to_calendar(session: Session, account: Account, event: Event) ->
     return event
 
 
-def _timers_for_account(account_id: int) -> dict[str, dict]:
-    return active_timers.setdefault(account_id, {})
+def _get_active_event(session: Session, account_id: int, activity_type: str) -> Optional[Event]:
+    return session.exec(
+        select(Event)
+        .where(
+            Event.account_id == account_id,
+            Event.type == activity_type,
+            Event.is_active.is_(True),
+        )
+        .order_by(Event.start_time.desc())
+    ).first()
 
 
 def _sync_google_calendar_to_db(session: Session, account: Account) -> CalendarSyncResponse:
@@ -564,12 +575,16 @@ def _delete_events_for_day(session: Session, account: Account, target_date: date
     ).all()
 
     for event in events:
-        if account.google_calendar_id and event.calendar_event_id:
-            get_calendar_service().delete_event(event.calendar_event_id, calendar_id=account.google_calendar_id)
-        session.delete(event)
+        _delete_event(session, account, event)
 
     session.commit()
     return len(events)
+
+
+def _delete_event(session: Session, account: Account, event: Event) -> None:
+    if account.google_calendar_id and event.calendar_event_id:
+        get_calendar_service().delete_event(event.calendar_event_id, calendar_id=account.google_calendar_id)
+    session.delete(event)
 
 
 def _sample_day_events(target_date: date, local_time_zone) -> list[dict]:
@@ -901,6 +916,7 @@ def create_event_endpoint(event: EventCreate, session_context: SessionContext = 
             end_time=_to_utc(event.end_time) if event.end_time is not None else None,
             duration=event.duration,
             details=event.details,
+            is_active=False,
         )
         session.add(db_event)
         session.commit()
@@ -934,6 +950,21 @@ def delete_events_for_day_endpoint(
             deleted_count=deleted_count,
             synced_to_calendar=account.google_calendar_id is not None,
         )
+
+
+@app.delete("/events/{event_id}")
+def delete_event_endpoint(event_id: int, session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        event = session.exec(
+            select(Event).where(Event.id == event_id, Event.account_id == account.id)
+        ).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+        _delete_event(session, account, event)
+        session.commit()
+        return {"status": "success"}
 
 
 @app.post("/events/simulate-day", response_model=DayActionResponse)
@@ -974,56 +1005,57 @@ def simulate_day_endpoint(
 def start_activity_endpoint(activity: ActivityStart, session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
+        activity_type = normalize_activity_type(activity.type)
+        if _get_active_event(session, account.id, activity_type):
+            return {"status": "error", "message": f"Activity '{activity_type}' is already running"}
 
-    activity_type = normalize_activity_type(activity.type)
-    timers = _timers_for_account(account.id)
-    if activity_type in timers:
-        return {"status": "error", "message": f"Activity '{activity_type}' is already running"}
-
-    timers[activity_type] = {
-        "start_time": datetime.now(timezone.utc),
-        "details": activity.details,
-    }
-    return {
-        "status": "success",
-        "message": f"Started tracking '{activity_type}'",
-        "start_time": timers[activity_type]["start_time"],
-    }
+        db_event = Event(
+            account_id=account.id,
+            type=activity_type,
+            title=activity_label(activity_type),
+            start_time=datetime.now(timezone.utc),
+            details=activity.details.strip() if activity.details else None,
+            is_active=True,
+        )
+        session.add(db_event)
+        session.commit()
+        session.refresh(db_event)
+        start_time = _ensure_utc(db_event.start_time)
+        return {
+            "status": "success",
+            "message": f"Started tracking '{activity_type}'",
+            "event_id": db_event.id,
+            "start_time": start_time,
+        }
 
 
 @app.post("/activities/stop")
 def stop_activity_endpoint(activity: ActivityStop, session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
-
         activity_type = normalize_activity_type(activity.type)
-        timers = _timers_for_account(account.id)
-        if activity_type not in timers:
+        db_event = _get_active_event(session, account.id, activity_type)
+        if not db_event:
             return {"status": "error", "message": f"No active timer for '{activity_type}'"}
 
-        timer_data = timers.pop(activity_type)
-        start_time = timer_data["start_time"]
+        start_time = _ensure_utc(db_event.start_time)
+        db_event.start_time = start_time
         end_time = datetime.now(timezone.utc)
         duration = int((end_time - start_time).total_seconds())
-
-        db_event = Event(
-            account_id=account.id,
-            type=activity_type,
-            title=activity_label(activity_type),
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            details=timer_data.get("details"),
-        )
+        db_event.end_time = end_time
+        db_event.duration = duration
+        db_event.is_active = False
         session.add(db_event)
         session.commit()
         session.refresh(db_event)
+        if account.google_calendar_id:
+            db_event = _sync_event_to_calendar(session, account, db_event)
         return {
             "status": "success",
             "message": f"Stopped tracking '{activity_type}'",
             "event_id": db_event.id,
             "start_time": start_time,
-            "end_time": end_time,
+            "end_time": _ensure_utc(end_time),
             "duration_seconds": duration,
         }
 
@@ -1063,7 +1095,8 @@ def finalize_event_endpoint(event_id: int, event_finalize: EventFinalize, sessio
             session.commit()
             session.refresh(event)
 
-        event = _sync_event_to_calendar(session, account, event)
+        if not event.is_active:
+            event = _sync_event_to_calendar(session, account, event)
         return _event_response(event)
 
 
