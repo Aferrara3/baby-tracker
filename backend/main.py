@@ -1,6 +1,8 @@
 import hashlib
+import json
 import logging
 import os
+import random
 from pathlib import Path
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
@@ -34,6 +36,54 @@ from config import (
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
+
+TRACKER_BUTTON_COUNT = 8
+TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
+
+TRACKER_SYMBOLS: list[dict[str, object]] = [
+    {"key": "bottle-wine", "label": "Bottle", "emoji": "🍼", "keywords": ["milk", "feed", "drink"]},
+    {"key": "utensils", "label": "Food", "emoji": "🥄", "keywords": ["meal", "eat", "snack"]},
+    {"key": "baby", "label": "Baby", "emoji": "👶", "keywords": ["kid", "child", "care"]},
+    {"key": "droplet", "label": "Pee", "emoji": "💧", "keywords": ["diaper", "wet", "bathroom"]},
+    {"key": "moon", "label": "Sleep", "emoji": "😴", "keywords": ["nap", "rest", "night"]},
+    {"key": "toilet", "label": "Poop", "emoji": "💩", "keywords": ["diaper", "bathroom", "change"]},
+    {"key": "user-2", "label": "Person", "emoji": "🧍", "keywords": ["personal", "self", "caregiver"]},
+    {"key": "milk", "label": "Milk", "emoji": "🥛", "keywords": ["pump", "drink", "feed"]},
+    {"key": "help-circle", "label": "Help", "emoji": "❓", "keywords": ["other", "misc", "question"]},
+    {"key": "briefcase", "label": "Work", "emoji": "💼", "keywords": ["office", "job", "career"]},
+    {"key": "dumbbell", "label": "Exercise", "emoji": "🏋️", "keywords": ["workout", "gym", "fitness"]},
+    {"key": "bath", "label": "Bath", "emoji": "🛁", "keywords": ["wash", "clean", "shower"]},
+    {"key": "car-front", "label": "Travel", "emoji": "🚗", "keywords": ["drive", "trip", "car"]},
+    {"key": "shopping-bag", "label": "Errands", "emoji": "🛍️", "keywords": ["shop", "store", "buy"]},
+    {"key": "house", "label": "Home", "emoji": "🏠", "keywords": ["household", "chores", "home"]},
+    {"key": "book-open", "label": "Learning", "emoji": "📚", "keywords": ["reading", "school", "study"]},
+    {"key": "stethoscope", "label": "Health", "emoji": "🩺", "keywords": ["doctor", "medical", "care"]},
+    {"key": "phone", "label": "Call", "emoji": "📞", "keywords": ["phone", "talk", "contact"]},
+    {"key": "music-4", "label": "Music", "emoji": "🎵", "keywords": ["song", "audio", "listen"]},
+    {"key": "heart", "label": "Love", "emoji": "❤️", "keywords": ["care", "family", "connection"]},
+    {"key": "pill", "label": "Medicine", "emoji": "💊", "keywords": ["meds", "rx", "health"]},
+    {"key": "timer", "label": "Timer", "emoji": "⏱️", "keywords": ["track", "duration", "time"]},
+]
+TRACKER_SYMBOL_META = {
+    str(symbol["key"]): {
+        "label": str(symbol["label"]),
+        "emoji": str(symbol["emoji"]),
+        "keywords": [str(keyword) for keyword in symbol["keywords"]],
+    }
+    for symbol in TRACKER_SYMBOLS
+}
+TRACKER_COLOR_KEYS = ("blue", "amber", "cyan", "pink", "indigo", "rose", "orange", "slate")
+DEFAULT_TRACKER_BUTTONS: list[dict[str, object]] = [
+    {"id": "bottle", "label": "Bottle", "icon_key": "bottle-wine", "color_key": "blue", "position": 0},
+    {"id": "food", "label": "Food", "icon_key": "utensils", "color_key": "amber", "position": 1},
+    {"id": "diaper_pee", "label": "Pee", "icon_key": "droplet", "color_key": "cyan", "position": 2},
+    {"id": "diaper_poop", "label": "Poop", "icon_key": "toilet", "color_key": "pink", "position": 3},
+    {"id": "sleep", "label": "Sleep", "icon_key": "moon", "color_key": "indigo", "position": 4},
+    {"id": "breastfeeding", "label": "Nursing", "icon_key": "user-2", "color_key": "rose", "position": 5},
+    {"id": "pump", "label": "Pump", "icon_key": "milk", "color_key": "orange", "position": 6},
+    {"id": "help", "label": "Other", "icon_key": "help-circle", "color_key": "slate", "position": 7},
+]
+DEFAULT_TRACKER_BUTTON_IDS = {str(button["id"]) for button in DEFAULT_TRACKER_BUTTONS}
 
 def _prepare_database() -> None:
     if not DATABASE_URL.startswith("sqlite:///"):
@@ -72,6 +122,7 @@ class Account(SQLModel, table=True):
     google_sync_token: Optional[str] = None
     google_last_synced_at: Optional[datetime] = None
     google_last_sync_status: Optional[str] = None
+    tracker_buttons_json: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -202,6 +253,35 @@ class EventFinalize(SQLModel):
     details: Optional[str] = None
 
 
+class TrackerButtonConfig(SQLModel):
+    id: str
+    label: str
+    icon_key: str
+    color_key: str
+    position: int
+
+
+class TrackerButtonResponse(TrackerButtonConfig):
+    emoji: str
+    title: str
+
+
+class TrackerSymbolOption(SQLModel):
+    key: str
+    label: str
+    emoji: str
+    keywords: list[str] = Field(default_factory=list)
+
+
+class TrackerButtonsResponse(SQLModel):
+    buttons: list[TrackerButtonResponse]
+    available_symbols: list[TrackerSymbolOption]
+
+
+class TrackerButtonsUpdate(SQLModel):
+    buttons: list[TrackerButtonConfig]
+
+
 class SessionContext(SQLModel):
     account_id: int
     token_hash: str
@@ -253,6 +333,7 @@ def _ensure_account_columns() -> None:
     _ensure_column("account", "google_sync_token", "ALTER TABLE account ADD COLUMN google_sync_token VARCHAR")
     _ensure_column("account", "google_last_synced_at", "ALTER TABLE account ADD COLUMN google_last_synced_at DATETIME")
     _ensure_column("account", "google_last_sync_status", "ALTER TABLE account ADD COLUMN google_last_sync_status VARCHAR")
+    _ensure_column("account", "tracker_buttons_json", "ALTER TABLE account ADD COLUMN tracker_buttons_json TEXT")
 
 
 def _normalize_username(username: str) -> str:
@@ -329,6 +410,149 @@ def _calendar_url(calendar_id: Optional[str]) -> Optional[str]:
     if not calendar_id:
         return None
     return f"https://calendar.google.com/calendar/u/0/r?cid={quote(calendar_id, safe='')}"
+
+
+def _tracker_symbol_emoji(icon_key: str) -> str:
+    return TRACKER_SYMBOL_META.get(icon_key, {}).get("emoji", "🏷️")
+
+
+def _tracker_button_title(label: str, icon_key: str) -> str:
+    cleaned_label = label.strip()
+    return f"{_tracker_symbol_emoji(icon_key)} {cleaned_label}" if cleaned_label else _tracker_symbol_emoji(icon_key)
+
+
+def _tracker_button_response(button: TrackerButtonConfig) -> TrackerButtonResponse:
+    return TrackerButtonResponse(
+        **button.model_dump(),
+        emoji=_tracker_symbol_emoji(button.icon_key),
+        title=_tracker_button_title(button.label, button.icon_key),
+    )
+
+
+def _available_tracker_symbols() -> list[TrackerSymbolOption]:
+    return [
+        TrackerSymbolOption(
+            key=str(symbol["key"]),
+            label=str(symbol["label"]),
+            emoji=str(symbol["emoji"]),
+            keywords=[str(keyword) for keyword in symbol["keywords"]],
+        )
+        for symbol in TRACKER_SYMBOLS
+    ]
+
+
+def _default_tracker_buttons() -> list[TrackerButtonConfig]:
+    return [TrackerButtonConfig(**button) for button in DEFAULT_TRACKER_BUTTONS]
+
+
+def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
+    if len(buttons) != TRACKER_BUTTON_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Exactly {TRACKER_BUTTON_COUNT} tracker buttons are required",
+        )
+
+    normalized_buttons: list[TrackerButtonConfig] = []
+    seen_ids: set[str] = set()
+    for position, button in enumerate(sorted(buttons, key=lambda item: item.position)):
+        button_id = normalize_activity_type(button.id)
+        if button_id not in DEFAULT_TRACKER_BUTTON_IDS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown tracker button id '{button.id}'",
+            )
+        if button_id in seen_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Duplicate tracker button id '{button.id}'",
+            )
+
+        label = button.label.strip()
+        if not label:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Button labels are required")
+        if len(label) > TRACKER_BUTTON_LABEL_MAX_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Button labels must be {TRACKER_BUTTON_LABEL_MAX_LENGTH} characters or fewer",
+            )
+
+        icon_key = button.icon_key.strip()
+        if icon_key not in TRACKER_SYMBOL_META:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown tracker symbol '{button.icon_key}'",
+            )
+
+        color_key = button.color_key.strip()
+        if color_key not in TRACKER_COLOR_KEYS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown tracker color '{button.color_key}'",
+            )
+
+        normalized_buttons.append(
+            TrackerButtonConfig(
+                id=button_id,
+                label=label,
+                icon_key=icon_key,
+                color_key=color_key,
+                position=position,
+            )
+        )
+        seen_ids.add(button_id)
+
+    if seen_ids != DEFAULT_TRACKER_BUTTON_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Tracker button ids must match the editable default set",
+        )
+
+    return normalized_buttons
+
+
+def _store_tracker_buttons(session: Session, account: Account, buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
+    validated_buttons = _validate_tracker_buttons(buttons)
+    account.tracker_buttons_json = json.dumps(
+        [button.model_dump() for button in validated_buttons],
+        separators=(",", ":"),
+    )
+    account.updated_at = datetime.now(timezone.utc)
+    session.add(account)
+    session.commit()
+    session.refresh(account)
+    return validated_buttons
+
+
+def _get_tracker_buttons(session: Session, account: Account) -> list[TrackerButtonConfig]:
+    if not account.tracker_buttons_json:
+        return _store_tracker_buttons(session, account, _default_tracker_buttons())
+
+    try:
+        raw_buttons = json.loads(account.tracker_buttons_json)
+        parsed_buttons = [TrackerButtonConfig.model_validate(raw_button) for raw_button in raw_buttons]
+        return _validate_tracker_buttons(parsed_buttons)
+    except (json.JSONDecodeError, TypeError, ValueError, HTTPException):
+        return _store_tracker_buttons(session, account, _default_tracker_buttons())
+
+
+def _tracker_buttons_response(session: Session, account: Account) -> TrackerButtonsResponse:
+    buttons = _get_tracker_buttons(session, account)
+    return TrackerButtonsResponse(
+        buttons=[_tracker_button_response(button) for button in buttons],
+        available_symbols=_available_tracker_symbols(),
+    )
+
+
+def _find_tracker_button(buttons: list[TrackerButtonConfig], activity_type: str) -> Optional[TrackerButtonConfig]:
+    normalized_type = normalize_activity_type(activity_type)
+    return next((button for button in buttons if button.id == normalized_type), None)
+
+
+def _resolved_event_title(buttons: list[TrackerButtonConfig], activity_type: str) -> str:
+    button = _find_tracker_button(buttons, activity_type)
+    if button is None:
+        return activity_label(activity_type)
+    return _tracker_button_title(button.label, button.icon_key)
 
 
 def _parse_target_date(target_date: Optional[str], local_time_zone) -> date:
@@ -587,7 +811,7 @@ def _delete_event(session: Session, account: Account, event: Event) -> None:
     session.delete(event)
 
 
-def _sample_day_events(target_date: date, local_time_zone) -> list[dict]:
+def _sample_day_events(target_date: date, local_time_zone, buttons: list[TrackerButtonConfig], seed_value: str) -> list[dict]:
     def at(hour: int, minute: int) -> datetime:
         return datetime.combine(
             target_date,
@@ -595,20 +819,54 @@ def _sample_day_events(target_date: date, local_time_zone) -> list[dict]:
             tzinfo=local_time_zone,
         ).astimezone(timezone.utc)
 
-    return [
-        {"type": "sleep", "title": activity_label("sleep"), "start_time": at(0, 30), "end_time": at(5, 45), "duration": 5 * 3600 + 15 * 60, "details": "Overnight sleep"},
-        {"type": "bottle", "title": activity_label("bottle"), "start_time": at(6, 5), "end_time": at(6, 25), "duration": 20 * 60, "details": "Morning bottle"},
-        {"type": "diaper_pee", "title": activity_label("diaper_pee"), "start_time": at(6, 40), "end_time": at(6, 45), "duration": 5 * 60, "details": "Quick diaper change"},
-        {"type": "breastfeeding", "title": activity_label("breastfeeding"), "start_time": at(8, 0), "end_time": at(8, 25), "duration": 25 * 60, "details": "Morning nursing session"},
-        {"type": "sleep", "title": activity_label("sleep"), "start_time": at(9, 30), "end_time": at(10, 45), "duration": 75 * 60, "details": "Morning nap"},
-        {"type": "food", "title": activity_label("food"), "start_time": at(11, 15), "end_time": at(11, 35), "duration": 20 * 60, "details": "Puree and water"},
-        {"type": "diaper_poop", "title": activity_label("diaper_poop"), "start_time": at(12, 5), "end_time": at(12, 15), "duration": 10 * 60, "details": "Post-lunch diaper"},
-        {"type": "pump", "title": activity_label("pump"), "start_time": at(13, 10), "end_time": at(13, 30), "duration": 20 * 60, "details": "Afternoon pump"},
-        {"type": "sleep", "title": activity_label("sleep"), "start_time": at(14, 0), "end_time": at(15, 10), "duration": 70 * 60, "details": "Afternoon nap"},
-        {"type": "food", "title": activity_label("food"), "start_time": at(17, 45), "end_time": at(18, 5), "duration": 20 * 60, "details": "Dinner solids"},
-        {"type": "bottle", "title": activity_label("bottle"), "start_time": at(19, 30), "end_time": at(19, 45), "duration": 15 * 60, "details": "Bedtime top-off"},
-        {"type": "sleep", "title": activity_label("sleep"), "start_time": at(20, 15), "end_time": at(23, 59), "duration": 3 * 3600 + 44 * 60, "details": "Bedtime stretch"},
+    if not buttons:
+        buttons = _default_tracker_buttons()
+
+    rng = random.Random(seed_value)
+    start_slots = [
+        (0, 30),
+        (6, 5),
+        (6, 40),
+        (8, 0),
+        (9, 30),
+        (11, 15),
+        (12, 5),
+        (13, 10),
+        (14, 0),
+        (17, 45),
+        (19, 30),
+        (20, 15),
     ]
+    day_end = at(23, 59)
+    ordered_buttons = sorted(buttons, key=lambda button: button.position)
+    sampled_buttons = ordered_buttons + [
+        rng.choice(ordered_buttons)
+        for _ in range(max(0, len(start_slots) - len(ordered_buttons)))
+    ]
+    rng.shuffle(sampled_buttons)
+
+    events: list[dict] = []
+    for index, (hour, minute) in enumerate(start_slots):
+        button = sampled_buttons[index]
+        start_time = at(hour, minute)
+        next_start_time = at(*start_slots[index + 1]) if index + 1 < len(start_slots) else day_end
+        max_duration_seconds = max(5 * 60, int((next_start_time - start_time).total_seconds()) - 5 * 60)
+        default_max = 2 * 60 * 60 if button.id == "sleep" else 50 * 60
+        duration = rng.randint(5 * 60, min(default_max, max_duration_seconds))
+        end_time = min(start_time + timedelta(seconds=duration), day_end)
+        duration = int((end_time - start_time).total_seconds())
+        events.append(
+            {
+                "type": button.id,
+                "title": _tracker_button_title(button.label, button.icon_key),
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": duration,
+                "details": f"Sample {button.label.lower()} event",
+            }
+        )
+
+    return events
 
 
 def _parse_google_datetime(value: Optional[dict]) -> Optional[datetime]:
@@ -828,6 +1086,21 @@ def update_account_settings(payload: AccountSettingsUpdate, session_context: Ses
         return _account_response(session, account)
 
 
+@app.get("/tracker-buttons", response_model=TrackerButtonsResponse)
+def get_tracker_buttons(session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        return _tracker_buttons_response(session, account)
+
+
+@app.patch("/tracker-buttons", response_model=TrackerButtonsResponse)
+def update_tracker_buttons(payload: TrackerButtonsUpdate, session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        _store_tracker_buttons(session, account, payload.buttons)
+        return _tracker_buttons_response(session, account)
+
+
 @app.post("/calendar/enable-sync", response_model=AccountResponse)
 def enable_calendar_sync(session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
@@ -908,10 +1181,12 @@ def sync_calendar_changes(session_context: SessionContext = Depends(require_sess
 def create_event_endpoint(event: EventCreate, session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
+        tracker_buttons = _get_tracker_buttons(session, account)
+        activity_type = normalize_activity_type(event.type)
         db_event = Event(
             account_id=account.id,
-            type=normalize_activity_type(event.type),
-            title=activity_label(event.type),
+            type=activity_type,
+            title=_resolved_event_title(tracker_buttons, activity_type),
             start_time=_to_utc(event.start_time),
             end_time=_to_utc(event.end_time) if event.end_time is not None else None,
             duration=event.duration,
@@ -985,7 +1260,13 @@ def simulate_day_endpoint(
 
         deleted_count = _delete_events_for_day(session, account, parsed_date, local_time_zone)
         created_count = 0
-        for payload in _sample_day_events(parsed_date, local_time_zone):
+        tracker_buttons = _get_tracker_buttons(session, account)
+        for payload in _sample_day_events(
+            parsed_date,
+            local_time_zone,
+            tracker_buttons,
+            seed_value=f"{account.id}:{parsed_date.isoformat()}",
+        ):
             event = Event(account_id=account.id, **payload)
             session.add(event)
             session.commit()
@@ -1005,6 +1286,7 @@ def simulate_day_endpoint(
 def start_activity_endpoint(activity: ActivityStart, session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
+        tracker_buttons = _get_tracker_buttons(session, account)
         activity_type = normalize_activity_type(activity.type)
         if _get_active_event(session, account.id, activity_type):
             return {"status": "error", "message": f"Activity '{activity_type}' is already running"}
@@ -1012,7 +1294,7 @@ def start_activity_endpoint(activity: ActivityStart, session_context: SessionCon
         db_event = Event(
             account_id=account.id,
             type=activity_type,
-            title=activity_label(activity_type),
+            title=_resolved_event_title(tracker_buttons, activity_type),
             start_time=datetime.now(timezone.utc),
             details=activity.details.strip() if activity.details else None,
             is_active=True,

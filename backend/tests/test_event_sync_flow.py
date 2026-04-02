@@ -120,6 +120,7 @@ def client(tmp_path):
     main._calendar_service = FakeCalendarService()
 
     SQLModel.metadata.create_all(main.engine)
+    main._ensure_account_columns()
     main._ensure_event_columns()
 
     with TestClient(main.app) as test_client:
@@ -155,6 +156,28 @@ def test_register_returns_session_and_profile(client: TestClient):
     me = client.get("/auth/me", headers=auth_headers(data["token"]))
     assert me.status_code == 200
     assert me.json()["username"] == "parent1"
+
+
+def test_tracker_buttons_endpoint_returns_seeded_defaults(client: TestClient):
+    data = register(client, "buttons-defaults", "secret123")
+
+    response = client.get("/tracker-buttons", headers=auth_headers(data["token"]))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["buttons"]) == 8
+    assert {button["id"] for button in payload["buttons"]} == {
+        "bottle",
+        "food",
+        "diaper_pee",
+        "diaper_poop",
+        "sleep",
+        "breastfeeding",
+        "pump",
+        "help",
+    }
+    assert any(symbol["key"] == "dumbbell" for symbol in payload["available_symbols"])
+    assert payload["buttons"][0]["title"] == "🍼 Bottle"
 
 
 def test_first_account_adopts_legacy_events(client: TestClient):
@@ -337,6 +360,62 @@ def test_finalize_routes_event_to_account_calendar(client: TestClient):
     assert fake_service.created_events[0]["details"] == "4 oz formula"
 
 
+def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClient):
+    data = register(client, "custom-buttons-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    existing_buttons = client.get("/tracker-buttons", headers=headers)
+    assert existing_buttons.status_code == 200
+    buttons_payload = existing_buttons.json()["buttons"]
+
+    updated_buttons = []
+    for button in buttons_payload:
+        if button["id"] == "bottle":
+            updated_buttons.append(
+                {
+                    "id": button["id"],
+                    "label": "Workout",
+                    "icon_key": "dumbbell",
+                    "color_key": button["color_key"],
+                    "position": button["position"],
+                }
+            )
+        else:
+            updated_buttons.append(
+                {
+                    "id": button["id"],
+                    "label": button["label"],
+                    "icon_key": button["icon_key"],
+                    "color_key": button["color_key"],
+                    "position": button["position"],
+                }
+            )
+
+    saved = client.patch("/tracker-buttons", headers=headers, json={"buttons": updated_buttons})
+    assert saved.status_code == 200
+    assert next(button for button in saved.json()["buttons"] if button["id"] == "bottle")["title"] == "🏋️ Workout"
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "bottle", "start_time": datetime.now(timezone.utc).isoformat()},
+    )
+    assert created.status_code == 200
+    assert created.json()["title"] == "🏋️ Workout"
+
+    finalized = client.post(
+        f"/events/{created.json()['id']}/finalize",
+        headers=headers,
+        json={"details": "customized"},
+    )
+    assert finalized.status_code == 200
+    assert finalized.json()["title"] == "🏋️ Workout"
+
+    fake_service = main.get_calendar_service()
+    assert fake_service.created_events[-1]["summary"] == "🏋️ Workout"
+
+
 def test_updating_settings_renames_service_managed_calendar(client: TestClient):
     data = register(client, "rename-user", "secret123", baby_name="Old")
     token = data["token"]
@@ -513,6 +592,40 @@ def test_simulate_day_replaces_selected_day_and_syncs_sample_events(client: Test
     latest_event = max(fake_service.created_events[1:], key=lambda event: event["start_time"])
     assert main._ensure_utc(earliest_event["start_time"]).astimezone(pacific).date().isoformat() == target_date
     assert main._ensure_utc(latest_event["start_time"]).astimezone(pacific).date().isoformat() == target_date
+
+
+def test_simulate_day_uses_current_tracker_buttons(client: TestClient):
+    data = register(client, "sim-custom-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    existing_buttons = client.get("/tracker-buttons", headers=headers)
+    assert existing_buttons.status_code == 200
+    updated_buttons = []
+    for button in existing_buttons.json()["buttons"]:
+        updated_buttons.append(
+            {
+                "id": button["id"],
+                "label": "Workout" if button["id"] == "bottle" else button["label"],
+                "icon_key": "dumbbell" if button["id"] == "bottle" else button["icon_key"],
+                "color_key": button["color_key"],
+                "position": button["position"],
+            }
+        )
+
+    saved = client.patch("/tracker-buttons", headers=headers, json={"buttons": updated_buttons})
+    assert saved.status_code == 200
+
+    simulated = client.post(
+        "/events/simulate-day?target_date=2026-04-03&time_zone=UTC",
+        headers=headers,
+    )
+    assert simulated.status_code == 200
+    assert simulated.json()["created_count"] == 12
+
+    fake_service = main.get_calendar_service()
+    created_titles = {event["summary"] for event in fake_service.created_events}
+    assert "🏋️ Workout" in created_titles
 
 
 def test_delete_events_for_day_uses_local_timezone_boundaries(client: TestClient):

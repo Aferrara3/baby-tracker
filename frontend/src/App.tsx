@@ -1,11 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BottleWine,
-  Utensils,
-  Baby,
-  Moon,
-  User2,
-  Milk,
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
   HelpCircle,
   LogOut,
   Send,
@@ -21,6 +30,19 @@ import { clsx } from 'clsx';
 import ActivityButton from './components/ActivityButton';
 import Toast from './components/Toast';
 import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
+import {
+  DEFAULT_TRACKER_BUTTONS,
+  DEFAULT_TRACKER_SYMBOLS,
+  deriveTrackerButton,
+  getTrackerButtonColorClass,
+  getTrackerButtonIcon,
+  normalizeTrackerButtons,
+  sortTrackerButtons,
+  type TrackerButtonConfig,
+  type TrackerButtonsResponse,
+  type TrackerButtonUpdate,
+  type TrackerSymbolOption,
+} from './trackerButtons';
 
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
 const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
@@ -75,17 +97,6 @@ interface PendingLogItem {
   activityId: string;
 }
 
-const ACTIVITIES: Activity[] = [
-  { id: 'bottle', icon: BottleWine, label: 'Bottle', colorClass: 'bg-gradient-to-br from-blue-400 to-blue-600 dark:from-blue-500 dark:to-blue-700 shadow-blue-200 dark:shadow-blue-900/30' },
-  { id: 'food', icon: Utensils, label: 'Food', colorClass: 'bg-gradient-to-br from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700 shadow-amber-200 dark:shadow-amber-900/30' },
-  { id: 'diaper_pee', icon: Baby, label: 'Pee', colorClass: 'bg-gradient-to-br from-cyan-400 to-cyan-600 dark:from-cyan-500 dark:to-cyan-700 shadow-cyan-200 dark:shadow-cyan-900/30' },
-  { id: 'diaper_poop', icon: Baby, label: 'Poop', colorClass: 'bg-gradient-to-br from-pink-400 to-pink-600 dark:from-pink-500 dark:to-pink-700 shadow-pink-200 dark:shadow-pink-900/30' },
-  { id: 'sleep', icon: Moon, label: 'Sleep', colorClass: 'bg-gradient-to-br from-indigo-400 to-indigo-600 dark:from-indigo-500 dark:to-indigo-700 shadow-indigo-200 dark:shadow-indigo-900/30' },
-  { id: 'breastfeeding', icon: User2, label: 'Nursing', colorClass: 'bg-gradient-to-br from-rose-400 to-rose-600 dark:from-rose-500 dark:to-rose-700 shadow-rose-200 dark:shadow-rose-900/30' },
-  { id: 'pump', icon: Milk, label: 'Pump', colorClass: 'bg-gradient-to-br from-orange-400 to-orange-600 dark:from-orange-500 dark:to-orange-700 shadow-orange-200 dark:shadow-orange-900/30' },
-  { id: 'help', icon: HelpCircle, label: 'Other', colorClass: 'bg-gradient-to-br from-slate-400 to-slate-600 dark:from-slate-500 dark:to-slate-700 shadow-slate-200 dark:shadow-slate-900/30' },
-];
-
 function parseEmails(input: string): string[] {
   return Array.from(
     new Set(
@@ -94,6 +105,46 @@ function parseEmails(input: string): string[] {
         .map((value) => value.trim().toLowerCase())
         .filter(Boolean),
     ),
+  );
+}
+
+interface SortableDraftButtonCardProps {
+  button: TrackerButtonConfig;
+  isSelected: boolean;
+  onSelect: () => void;
+}
+
+function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraftButtonCardProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: button.id });
+  const iconComponent = getTrackerButtonIcon(button.icon_key);
+
+  return (
+    <button
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      type="button"
+      onClick={onSelect}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        touchAction: 'none',
+      }}
+      className={clsx(
+        'flex flex-col items-center gap-2 rounded-2xl border p-2 text-center transition cursor-grab active:cursor-grabbing',
+        isSelected
+          ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-950/30'
+          : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/40 dark:hover:border-slate-600',
+        isDragging && 'shadow-xl opacity-90',
+      )}
+    >
+      <div className={clsx('flex h-[4.5rem] w-[4.5rem] items-center justify-center rounded-2xl shadow-md md:h-24 md:w-24', getTrackerButtonColorClass(button.color_key))}>
+        {createElement(iconComponent, { size: 30, className: 'text-white', strokeWidth: 2.4 })}
+      </div>
+      <p className="max-w-full truncate text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200 md:text-sm">
+        {button.label.trim() || 'Untitled'}
+      </p>
+    </button>
   );
 }
 
@@ -111,18 +162,57 @@ export default function App() {
   const [inputValue, setInputValue] = useState('');
   const [pendingLogs, setPendingLogs] = useState<PendingLogItem[]>([]);
   const [activeView, setActiveView] = useState<'tracker' | 'settings'>('tracker');
+  const [settingsTab, setSettingsTab] = useState<'calendar' | 'buttons'>('calendar');
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
+  const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
+  const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
+  const [availableSymbols, setAvailableSymbols] = useState<TrackerSymbolOption[]>(DEFAULT_TRACKER_SYMBOLS);
+  const [selectedButtonId, setSelectedButtonId] = useState(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+  const [symbolSearch, setSymbolSearch] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
+  const dragSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+  );
 
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
   );
+  const activities = useMemo<Activity[]>(
+    () =>
+      sortTrackerButtons(trackerButtons).map((button) => ({
+        id: button.id,
+        icon: getTrackerButtonIcon(button.icon_key),
+        label: button.label,
+        colorClass: getTrackerButtonColorClass(button.color_key),
+      })),
+    [trackerButtons],
+  );
+  const orderedDraftButtons = useMemo(
+    () => sortTrackerButtons(settingsButtonsDraft),
+    [settingsButtonsDraft],
+  );
+  const selectedDraftButton = orderedDraftButtons.find((button) => button.id === selectedButtonId) ?? orderedDraftButtons[0] ?? null;
+  const filteredSymbols = useMemo(() => {
+    const query = symbolSearch.trim().toLowerCase();
+    if (!query) {
+      return availableSymbols;
+    }
+
+    return availableSymbols.filter((symbol) =>
+      [symbol.label, symbol.key, symbol.emoji, ...symbol.keywords]
+        .join(' ')
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [availableSymbols, symbolSearch]);
   const activePendingLog = pendingLogs[0] ?? null;
-  const pendingActivityLabel = ACTIVITIES.find((activity) => activity.id === activePendingLog?.activityId)?.label ?? 'event';
+  const pendingActivityLabel = activities.find((activity) => activity.id === activePendingLog?.activityId)?.label ?? 'event';
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now().toString();
@@ -138,17 +228,24 @@ export default function App() {
     setAccount(nextAccount);
     setSettingsBabyName(nextAccount.baby_name ?? '');
     setSettingsShareEmails(nextAccount.share_emails.join(', '));
+    setSettingsTab('calendar');
   };
 
-  const clearAuth = () => {
+  const clearAuth = useCallback(() => {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     setToken('');
     setAccount(null);
     setActiveView('tracker');
+    setSettingsTab('calendar');
     setRunningActivities({});
     setPendingLogs([]);
     setInputValue('');
-  };
+    setTrackerButtons(DEFAULT_TRACKER_BUTTONS);
+    setSettingsButtonsDraft(DEFAULT_TRACKER_BUTTONS);
+    setAvailableSymbols(DEFAULT_TRACKER_SYMBOLS);
+    setSelectedButtonId(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+    setSymbolSearch('');
+  }, []);
 
   const hideInteractionTip = useCallback(() => {
     localStorage.setItem(INTERACTION_TIP_STORAGE_KEY, 'true');
@@ -163,12 +260,25 @@ export default function App() {
       }
 
       try {
-        const response = await axios.get<Account>(`${API_BASE}/auth/me`, {
-          headers: authHeaders,
-        });
-        setAccount(response.data);
-        setSettingsBabyName(response.data.baby_name ?? '');
-        setSettingsShareEmails(response.data.share_emails.join(', '));
+        const [accountResponse, trackerButtonsResponse] = await Promise.all([
+          axios.get<Account>(`${API_BASE}/auth/me`, {
+            headers: authHeaders,
+          }),
+          axios.get<TrackerButtonsResponse>(`${API_BASE}/tracker-buttons`, {
+            headers: authHeaders,
+          }),
+        ]);
+        setAccount(accountResponse.data);
+        setSettingsBabyName(accountResponse.data.baby_name ?? '');
+        setSettingsShareEmails(accountResponse.data.share_emails.join(', '));
+        const nextButtons = normalizeTrackerButtons(
+          trackerButtonsResponse.data.buttons,
+          trackerButtonsResponse.data.available_symbols,
+        );
+        setTrackerButtons(nextButtons);
+        setSettingsButtonsDraft(nextButtons);
+        setAvailableSymbols(trackerButtonsResponse.data.available_symbols);
+        setSelectedButtonId(nextButtons[0]?.id ?? 'bottle');
       } catch {
         clearAuth();
       } finally {
@@ -177,7 +287,7 @@ export default function App() {
     };
 
     void fetchAccount();
-  }, [authHeaders, token]);
+  }, [authHeaders, clearAuth, token]);
 
   const refreshRunningActivities = useCallback(async () => {
     if (!authHeaders) {
@@ -292,6 +402,86 @@ export default function App() {
       setSettingsShareEmails(response.data.share_emails.join(', '));
     }
   }, [authHeaders]);
+
+  const updateDraftButton = useCallback((buttonId: string, changes: Partial<TrackerButtonUpdate>) => {
+    setSettingsButtonsDraft((currentButtons) =>
+      currentButtons.map((button) => {
+        if (button.id !== buttonId) {
+          return button;
+        }
+        return deriveTrackerButton(
+          {
+            id: button.id,
+            label: changes.label ?? button.label,
+            icon_key: changes.icon_key ?? button.icon_key,
+            color_key: changes.color_key ?? button.color_key,
+            position: button.position,
+          },
+          availableSymbols,
+        );
+      }),
+    );
+  }, [availableSymbols]);
+
+  const handleButtonsDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) {
+      return;
+    }
+
+    setSettingsButtonsDraft((currentButtons) => {
+      const orderedButtons = sortTrackerButtons(currentButtons);
+      const oldIndex = orderedButtons.findIndex((button) => button.id === active.id);
+      const newIndex = orderedButtons.findIndex((button) => button.id === over.id);
+
+      if (oldIndex < 0 || newIndex < 0) {
+        return currentButtons;
+      }
+
+      return arrayMove(orderedButtons, oldIndex, newIndex).map((button, index) => ({
+        ...button,
+        position: index,
+      }));
+    });
+  }, []);
+
+  const handleSaveButtons = async () => {
+    if (!authHeaders) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const payload = {
+        buttons: sortTrackerButtons(settingsButtonsDraft).map((button, position) => ({
+          id: button.id,
+          label: button.label.trim(),
+          icon_key: button.icon_key,
+          color_key: button.color_key,
+          position,
+        })),
+      };
+      const response = await axios.patch<TrackerButtonsResponse>(`${API_BASE}/tracker-buttons`, payload, {
+        headers: authHeaders,
+      });
+      const nextButtons = normalizeTrackerButtons(response.data.buttons, response.data.available_symbols);
+      setTrackerButtons(nextButtons);
+      setSettingsButtonsDraft(nextButtons);
+      setAvailableSymbols(response.data.available_symbols);
+      setSelectedButtonId((current) => {
+        if (nextButtons.some((button) => button.id === current)) {
+          return current;
+        }
+        return nextButtons[0]?.id ?? 'bottle';
+      });
+      addToast('Buttons saved', 'success');
+    } catch (error) {
+      addToast('Failed to save buttons', 'error');
+      console.error('Tracker button settings error:', error);
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   const handleUndoPendingLog = useCallback(async () => {
     if (!activePendingLog || !authHeaders) {
@@ -733,119 +923,255 @@ export default function App() {
           <section className="mx-auto w-full max-w-xl pb-6">
             <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-lg p-6 space-y-5">
               <div>
-                <h2 className="text-xl font-bold">Calendar settings</h2>
+                <h2 className="text-xl font-bold">Settings</h2>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                  Manage your household calendar, baby label, and shared Gmail addresses.
+                  Manage your household calendar and the 8 tracked buttons on the main grid.
                 </p>
               </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Baby name</label>
-                  <input
-                    value={settingsBabyName}
-                    onChange={(event) => setSettingsBabyName(event.target.value)}
-                    placeholder="Baby name"
-                    className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Share with Gmail addresses</label>
-                  <textarea
-                    value={settingsShareEmails}
-                    onChange={(event) => setSettingsShareEmails(event.target.value)}
-                    placeholder="mom@example.com, dad@example.com"
-                    rows={4}
-                    className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-                    Enable sync will save the current baby name and share-email edits automatically first.
-                  </p>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-800/50 space-y-2 text-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-semibold">Sync status</span>
-                  <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', account.calendar_connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}>
-                    {account.calendar_connected ? 'Connected' : 'Local only'}
-                  </span>
-                </div>
-                {account.google_calendar_summary && <p>Calendar: {account.google_calendar_summary}</p>}
-                {account.calendar_url && (
-                  <a href={account.calendar_url} target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 underline">
-                    Open in Google Calendar
-                  </a>
-                )}
-                <p className="text-slate-500 dark:text-slate-400">
-                  {account.service_managed_calendar
-                    ? 'This calendar is owned by the service account and shared back to your saved emails.'
-                    : account.calendar_connected
-                      ? 'You are still linked to the legacy shared calendar. Enabling sync will provision your own household calendar.'
-                      : 'Provisioning creates a service-account-owned calendar for this household.'}
-                </p>
-                {account.google_last_synced_at && (
-                  <p className="text-slate-500 dark:text-slate-400">
-                    Last Google pull sync: {new Date(account.google_last_synced_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
-                  </p>
-                )}
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="flex rounded-2xl bg-slate-100 dark:bg-slate-800 p-1">
                 <button
-                  onClick={() => void handleSaveSettings()}
-                  disabled={isBusy}
-                  className="rounded-2xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold px-4 py-3 disabled:opacity-60"
+                  onClick={() => setSettingsTab('calendar')}
+                  className={clsx(
+                    'flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition',
+                    settingsTab === 'calendar'
+                      ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white'
+                      : 'text-slate-500 dark:text-slate-400',
+                  )}
                 >
-                  Save settings
+                  Calendar
                 </button>
                 <button
-                  onClick={() => void handleEnableSync()}
-                  disabled={isBusy}
-                  className="rounded-2xl bg-blue-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                  onClick={() => setSettingsTab('buttons')}
+                  className={clsx(
+                    'flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition',
+                    settingsTab === 'buttons'
+                      ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white'
+                      : 'text-slate-500 dark:text-slate-400',
+                  )}
                 >
-                  Enable sync
-                </button>
-                <button
-                  onClick={() => void handleReshare()}
-                  disabled={isBusy}
-                  className="rounded-2xl bg-emerald-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
-                >
-                  Re-share calendar
+                  Buttons
                 </button>
               </div>
 
-              <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-4 space-y-3">
-                <div>
-                  <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Quick tools</h3>
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                    Handy cleanup and visualization shortcuts scoped only to this signed-in household.
-                  </p>
+              {settingsTab === 'calendar' ? (
+                <>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Baby name</label>
+                      <input
+                        value={settingsBabyName}
+                        onChange={(event) => setSettingsBabyName(event.target.value)}
+                        placeholder="Baby name"
+                        className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Share with Gmail addresses</label>
+                      <textarea
+                        value={settingsShareEmails}
+                        onChange={(event) => setSettingsShareEmails(event.target.value)}
+                        placeholder="mom@example.com, dad@example.com"
+                        rows={4}
+                        className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                        Enable sync will save the current baby name and share-email edits automatically first.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-800/50 space-y-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-semibold">Sync status</span>
+                      <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', account.calendar_connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}>
+                        {account.calendar_connected ? 'Connected' : 'Local only'}
+                      </span>
+                    </div>
+                    {account.google_calendar_summary && <p>Calendar: {account.google_calendar_summary}</p>}
+                    {account.calendar_url && (
+                      <a href={account.calendar_url} target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 underline">
+                        Open in Google Calendar
+                      </a>
+                    )}
+                    <p className="text-slate-500 dark:text-slate-400">
+                      {account.service_managed_calendar
+                        ? 'This calendar is owned by the service account and shared back to your saved emails.'
+                        : account.calendar_connected
+                          ? 'You are still linked to the legacy shared calendar. Enabling sync will provision your own household calendar.'
+                          : 'Provisioning creates a service-account-owned calendar for this household.'}
+                    </p>
+                    {account.google_last_synced_at && (
+                      <p className="text-slate-500 dark:text-slate-400">
+                        Last Google pull sync: {new Date(account.google_last_synced_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <button
+                      onClick={() => void handleSaveSettings()}
+                      disabled={isBusy}
+                      className="rounded-2xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold px-4 py-3 disabled:opacity-60"
+                    >
+                      Save settings
+                    </button>
+                    <button
+                      onClick={() => void handleEnableSync()}
+                      disabled={isBusy}
+                      className="rounded-2xl bg-blue-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                    >
+                      Enable sync
+                    </button>
+                    <button
+                      onClick={() => void handleReshare()}
+                      disabled={isBusy}
+                      className="rounded-2xl bg-emerald-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                    >
+                      Re-share calendar
+                    </button>
+                  </div>
+
+                  <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-4 space-y-3">
+                    <div>
+                      <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Quick tools</h3>
+                      <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                        Handy cleanup and visualization shortcuts scoped only to this signed-in household.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <button
+                        onClick={() => void handleClearToday()}
+                        disabled={isBusy}
+                        className="rounded-2xl bg-rose-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                      >
+                        Delete today's events
+                      </button>
+                      <button
+                        onClick={() => void handleSimulateDay()}
+                        disabled={isBusy || !account.calendar_connected}
+                        className="rounded-2xl bg-violet-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                      >
+                        Simulate sample day
+                      </button>
+                      <button
+                        onClick={() => void handleForceSyncFromGoogle()}
+                        disabled={isBusy || !account.calendar_connected}
+                        className="rounded-2xl bg-violet-700 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                      >
+                        Force sync now
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
+                    <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Tracked buttons</h3>
+                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      Drag to reorder. Click on a button to edit the label or icon below!
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={handleButtonsDragEnd}>
+                      <div className="grid justify-items-center gap-x-4 gap-y-4 sm:gap-x-6 sm:gap-y-6 grid-cols-2 md:grid-cols-4">
+                        <SortableContext items={orderedDraftButtons.map((button) => button.id)} strategy={rectSortingStrategy}>
+                          {orderedDraftButtons.map((button) => (
+                            <SortableDraftButtonCard
+                              key={button.id}
+                              button={button}
+                              isSelected={button.id === selectedDraftButton?.id}
+                              onSelect={() => setSelectedButtonId(button.id)}
+                            />
+                          ))}
+                        </SortableContext>
+                      </div>
+                    </DndContext>
+
+                    {selectedDraftButton && (
+                      <div className="space-y-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <h3 className="font-semibold">{selectedDraftButton.label}</h3>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">
+                              Calendar preview: {selectedDraftButton.title}
+                            </p>
+                          </div>
+                          <div className={clsx('flex h-14 w-14 items-center justify-center rounded-2xl shadow-md', getTrackerButtonColorClass(selectedDraftButton.color_key))}>
+                            {createElement(getTrackerButtonIcon(selectedDraftButton.icon_key), {
+                              size: 24,
+                              className: 'text-white',
+                              strokeWidth: 2.4,
+                            })}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="mb-2 block text-sm font-semibold">Button label</label>
+                          <input
+                            value={selectedDraftButton.label}
+                            onChange={(event) => updateDraftButton(selectedDraftButton.id, { label: event.target.value })}
+                            maxLength={24}
+                            placeholder="Button label"
+                            className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                            Keep it short so it fits cleanly on the main grid.
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="mb-2 block text-sm font-semibold">Search symbols</label>
+                          <input
+                            value={symbolSearch}
+                            onChange={(event) => setSymbolSearch(event.target.value)}
+                            placeholder="Search work, sleep, food, health..."
+                            className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 md:grid-cols-6">
+                          {filteredSymbols.map((symbol) => {
+                            const isSelected = symbol.key === selectedDraftButton.icon_key;
+
+                            return (
+                              <button
+                                key={symbol.key}
+                                type="button"
+                                onClick={() => updateDraftButton(selectedDraftButton.id, { icon_key: symbol.key })}
+                                className={clsx(
+                                  'flex aspect-square items-center justify-center rounded-2xl border p-3 transition',
+                                  isSelected
+                                    ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-950/30'
+                                    : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/40 dark:hover:border-slate-600',
+                                )}
+                                title={symbol.label}
+                                aria-label={symbol.label}
+                              >
+                                {createElement(getTrackerButtonIcon(symbol.key), { size: 20 })}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {filteredSymbols.length === 0 && (
+                          <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                            No symbols match that search yet.
+                          </p>
+                        )}
+
+                        <button
+                          onClick={() => void handleSaveButtons()}
+                          disabled={isBusy}
+                          className="w-full rounded-2xl bg-slate-900 dark:bg-slate-100 px-4 py-3 font-semibold text-white dark:text-slate-900 disabled:opacity-60"
+                        >
+                          Save buttons
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <button
-                    onClick={() => void handleClearToday()}
-                    disabled={isBusy}
-                    className="rounded-2xl bg-rose-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
-                  >
-                    Delete today's events
-                  </button>
-                  <button
-                    onClick={() => void handleSimulateDay()}
-                    disabled={isBusy || !account.calendar_connected}
-                    className="rounded-2xl bg-violet-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
-                  >
-                    Simulate sample day
-                  </button>
-                  <button
-                    onClick={() => void handleForceSyncFromGoogle()}
-                    disabled={isBusy || !account.calendar_connected}
-                    className="rounded-2xl bg-violet-700 text-white font-semibold px-4 py-3 disabled:opacity-60"
-                  >
-                    Force sync now
-                  </button>
-                </div>
-              </div>
+              )}
             </div>
           </section>
         ) : (
@@ -872,7 +1198,7 @@ export default function App() {
             </div>
 
             <div className="grid flex-1 min-h-0 content-start justify-items-center gap-x-4 gap-y-4 pt-1 sm:content-center md:grid-cols-4 md:gap-x-6 md:gap-y-8 grid-cols-2">
-              {ACTIVITIES.map((activity) => (
+              {activities.map((activity) => (
                 <ActivityButton
                   key={`${activity.id}-${runningActivities[activity.id] ?? 'idle'}`}
                   activity={activity}
