@@ -180,6 +180,115 @@ def test_tracker_buttons_endpoint_returns_seeded_defaults(client: TestClient):
     assert payload["buttons"][0]["title"] == "🍼 Bottle"
 
 
+def test_tracker_buttons_accept_multiple_pages(client: TestClient):
+    data = register(client, "paged-buttons", "secret123")
+    token = data["token"]
+
+    existing = client.get("/tracker-buttons", headers=auth_headers(token))
+    assert existing.status_code == 200
+
+    second_page = [
+        {
+            "id": "medicine",
+            "label": "Medicine",
+            "icon_key": "pill-bottle",
+            "color_key": "rose",
+            "position": 8,
+        },
+        {
+            "id": "temperature",
+            "label": "Temp",
+            "icon_key": "thermometer",
+            "color_key": "amber",
+            "position": 9,
+        },
+        {
+            "id": "bath",
+            "label": "Bath",
+            "icon_key": "bath",
+            "color_key": "cyan",
+            "position": 10,
+        },
+        {
+            "id": "outside",
+            "label": "Outside",
+            "icon_key": "leaf",
+            "color_key": "blue",
+            "position": 11,
+        },
+        {
+            "id": "tummy_time",
+            "label": "Tummy",
+            "icon_key": "baby",
+            "color_key": "pink",
+            "position": 12,
+        },
+        {
+            "id": "play",
+            "label": "Play",
+            "icon_key": "gamepad-2",
+            "color_key": "indigo",
+            "position": 13,
+        },
+        {
+            "id": "doctor",
+            "label": "Doctor",
+            "icon_key": "stethoscope",
+            "color_key": "orange",
+            "position": 14,
+        },
+        {
+            "id": "notes",
+            "label": "Notes",
+            "icon_key": "notebook-pen",
+            "color_key": "slate",
+            "position": 15,
+        },
+    ]
+
+    saved = client.patch(
+        "/tracker-buttons",
+        headers=auth_headers(token),
+        json={"buttons": existing.json()["buttons"] + second_page},
+    )
+    assert saved.status_code == 200
+    assert len(saved.json()["buttons"]) == 16
+    assert saved.json()["buttons"][8]["id"] == "medicine"
+
+
+def test_tracker_buttons_reject_more_than_three_pages(client: TestClient):
+    data = register(client, "too-many-pages", "secret123")
+    token = data["token"]
+
+    page_one = client.get("/tracker-buttons", headers=auth_headers(token)).json()["buttons"]
+    page_two = [
+        {"id": "medicine", "label": "Medicine", "icon_key": "pill-bottle", "color_key": "rose", "position": 8},
+        {"id": "temperature", "label": "Temp", "icon_key": "thermometer", "color_key": "amber", "position": 9},
+        {"id": "bath", "label": "Bath", "icon_key": "bath", "color_key": "cyan", "position": 10},
+        {"id": "outside", "label": "Outside", "icon_key": "leaf", "color_key": "blue", "position": 11},
+        {"id": "tummy_time", "label": "Tummy", "icon_key": "baby", "color_key": "pink", "position": 12},
+        {"id": "play", "label": "Play", "icon_key": "gamepad-2", "color_key": "indigo", "position": 13},
+        {"id": "doctor", "label": "Doctor", "icon_key": "stethoscope", "color_key": "orange", "position": 14},
+        {"id": "notes", "label": "Notes", "icon_key": "notebook-pen", "color_key": "slate", "position": 15},
+    ]
+    page_three = [
+        {"id": f"extra_page_3_{index + 1}", "label": f"Other {index + 1}", "icon_key": "help-circle", "color_key": "slate", "position": 16 + index}
+        for index in range(8)
+    ]
+    page_four = [
+        {"id": f"extra_page_4_{index + 1}", "label": f"Other {index + 1}", "icon_key": "help-circle", "color_key": "slate", "position": 24 + index}
+        for index in range(8)
+    ]
+
+    response = client.patch(
+        "/tracker-buttons",
+        headers=auth_headers(token),
+        json={"buttons": page_one + page_two + page_three + page_four},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Tracker buttons are limited to 3 pages"
+
+
 def test_first_account_adopts_legacy_events(client: TestClient):
     with Session(main.engine) as session:
         session.add(

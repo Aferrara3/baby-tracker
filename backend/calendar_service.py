@@ -25,6 +25,14 @@ ACTIVITY_META: dict[str, tuple[str, str]] = {
     "breastfeeding": ("🤱 Breastfeeding", "4"),
     "pump": ("🥛 Pump", "6"),
     "help": ("❓ Help", "1"),
+    "medicine": ("💊 Medicine", "4"),
+    "temperature": ("🌡️ Temperature", "5"),
+    "bath": ("🛁 Bath", "7"),
+    "outside": ("🍃 Outside", "2"),
+    "tummy_time": ("👶 Tummy Time", "6"),
+    "play": ("🎮 Play", "10"),
+    "doctor": ("🩺 Doctor", "11"),
+    "notes": ("📝 Notes", "3"),
 }
 
 ACTIVITY_TYPE_ALIASES: dict[str, str] = {
@@ -60,6 +68,14 @@ SUMMARY_TYPE_MAP.update(
         "Breastfeeding": "breastfeeding",
         "Pump": "pump",
         "Help": "help",
+        "Medicine": "medicine",
+        "Temperature": "temperature",
+        "Bath": "bath",
+        "Outside": "outside",
+        "Tummy Time": "tummy_time",
+        "Play": "play",
+        "Doctor": "doctor",
+        "Notes": "notes",
         "Nursing": "breastfeeding",
         "Other": "help",
     }

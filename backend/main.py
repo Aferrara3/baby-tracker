@@ -37,7 +37,8 @@ from config import (
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
-TRACKER_BUTTON_COUNT = 8
+TRACKER_BUTTONS_PER_PAGE = 8
+MAX_TRACKER_BUTTON_PAGES = 3
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
 
 TRACKER_SYMBOLS: list[dict[str, object]] = [
@@ -130,7 +131,6 @@ DEFAULT_TRACKER_BUTTONS: list[dict[str, object]] = [
     {"id": "pump", "label": "Pump", "icon_key": "milk", "color_key": "orange", "position": 6},
     {"id": "help", "label": "Other", "icon_key": "help-circle", "color_key": "slate", "position": 7},
 ]
-DEFAULT_TRACKER_BUTTON_IDS = {str(button["id"]) for button in DEFAULT_TRACKER_BUTTONS}
 
 def _prepare_database() -> None:
     if not DATABASE_URL.startswith("sqlite:///"):
@@ -493,21 +493,23 @@ def _default_tracker_buttons() -> list[TrackerButtonConfig]:
 
 
 def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
-    if len(buttons) != TRACKER_BUTTON_COUNT:
+    if len(buttons) < TRACKER_BUTTONS_PER_PAGE or len(buttons) % TRACKER_BUTTONS_PER_PAGE != 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Exactly {TRACKER_BUTTON_COUNT} tracker buttons are required",
+            detail=f"Tracker buttons must be saved in full pages of {TRACKER_BUTTONS_PER_PAGE}",
+        )
+    if len(buttons) > TRACKER_BUTTONS_PER_PAGE * MAX_TRACKER_BUTTON_PAGES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Tracker buttons are limited to {MAX_TRACKER_BUTTON_PAGES} pages",
         )
 
     normalized_buttons: list[TrackerButtonConfig] = []
     seen_ids: set[str] = set()
     for position, button in enumerate(sorted(buttons, key=lambda item: item.position)):
-        button_id = normalize_activity_type(button.id)
-        if button_id not in DEFAULT_TRACKER_BUTTON_IDS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unknown tracker button id '{button.id}'",
-            )
+        button_id = normalize_activity_type(button.id.strip())
+        if not button_id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Tracker button ids are required")
         if button_id in seen_ids:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -547,12 +549,6 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
             )
         )
         seen_ids.add(button_id)
-
-    if seen_ids != DEFAULT_TRACKER_BUTTON_IDS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Tracker button ids must match the editable default set",
-        )
 
     return normalized_buttons
 
@@ -886,10 +882,12 @@ def _sample_day_events(target_date: date, local_time_zone, buttons: list[Tracker
     ]
     day_end = at(23, 59)
     ordered_buttons = sorted(buttons, key=lambda button: button.position)
-    sampled_buttons = ordered_buttons + [
-        rng.choice(ordered_buttons)
-        for _ in range(max(0, len(start_slots) - len(ordered_buttons)))
-    ]
+    sampled_buttons = ordered_buttons[: len(start_slots)]
+    if len(sampled_buttons) < len(start_slots):
+        sampled_buttons.extend(
+            rng.choice(ordered_buttons)
+            for _ in range(max(0, len(start_slots) - len(sampled_buttons)))
+        )
     rng.shuffle(sampled_buttons)
 
     events: list[dict] = []

@@ -6,7 +6,7 @@ Baby activity tracker with a FastAPI backend, React frontend, SQLite storage, an
 
 - Household-scoped accounts with username/password sign-in
 - Activity logging for bottle, food, diaper, sleep, breastfeeding, pump, and help
-- Customizable 8-button tracker grid with reorderable labels and symbol-based Google Calendar emoji mapping
+- Customizable paged tracker grid with add/remove pages, reorderable labels, and symbol-based Google Calendar emoji mapping
 - Tap-to-log and hold-to-start/stop timer flows
 - Service-account-managed Google Calendar provisioning and sharing
 - Google Calendar write sync plus pull-based reconciliation back into SQLite

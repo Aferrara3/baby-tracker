@@ -100,6 +100,10 @@ export interface TrackerButtonsResponse {
   available_symbols: TrackerSymbolOption[];
 }
 
+export const TRACKER_BUTTONS_PER_PAGE = 8;
+export const MAX_TRACKER_BUTTON_PAGES = 3;
+const PLACEHOLDER_PAGE_PREFIX = 'extra_page';
+
 const ICONS_BY_KEY: Record<string, LucideIcon> = {
   'alarm-clock': AlarmClock,
   apple: Apple,
@@ -265,6 +269,17 @@ export const DEFAULT_TRACKER_BUTTONS: TrackerButtonConfig[] = [
   { id: 'help', label: 'Other', icon_key: 'help-circle', color_key: 'slate', position: 7, emoji: '❓', title: '❓ Other' },
 ];
 
+export const SECOND_PAGE_DEFAULT_TRACKER_BUTTONS: TrackerButtonConfig[] = [
+  { id: 'medicine', label: 'Medicine', icon_key: 'pill-bottle', color_key: 'rose', position: 8, emoji: '💊', title: '💊 Medicine' },
+  { id: 'temperature', label: 'Temp', icon_key: 'thermometer', color_key: 'amber', position: 9, emoji: '🌡️', title: '🌡️ Temp' },
+  { id: 'bath', label: 'Bath', icon_key: 'bath', color_key: 'cyan', position: 10, emoji: '🛁', title: '🛁 Bath' },
+  { id: 'outside', label: 'Outside', icon_key: 'leaf', color_key: 'blue', position: 11, emoji: '🍃', title: '🍃 Outside' },
+  { id: 'tummy_time', label: 'Tummy', icon_key: 'baby', color_key: 'pink', position: 12, emoji: '👶', title: '👶 Tummy' },
+  { id: 'play', label: 'Play', icon_key: 'gamepad-2', color_key: 'indigo', position: 13, emoji: '🎮', title: '🎮 Play' },
+  { id: 'doctor', label: 'Doctor', icon_key: 'stethoscope', color_key: 'orange', position: 14, emoji: '🩺', title: '🩺 Doctor' },
+  { id: 'notes', label: 'Notes', icon_key: 'notebook-pen', color_key: 'slate', position: 15, emoji: '📝', title: '📝 Notes' },
+];
+
 export function getTrackerButtonIcon(iconKey: string): LucideIcon {
   return ICONS_BY_KEY[iconKey] ?? HelpCircle;
 }
@@ -300,4 +315,40 @@ export function sortTrackerButtons<T extends { position: number }>(buttons: T[])
 
 export function normalizeTrackerButtons(buttons: TrackerButtonConfig[], symbols: TrackerSymbolOption[]): TrackerButtonConfig[] {
   return sortTrackerButtons(buttons).map((button, index) => deriveTrackerButton({ ...button, position: index }, symbols));
+}
+
+export function createTrackerButtonsForPage(pageIndex: number, symbols: TrackerSymbolOption[]): TrackerButtonConfig[] {
+  const pageStart = pageIndex * TRACKER_BUTTONS_PER_PAGE;
+  if (pageIndex === 0) {
+    return DEFAULT_TRACKER_BUTTONS.map((button, index) => deriveTrackerButton({ ...button, position: pageStart + index }, symbols));
+  }
+
+  if (pageIndex === 1) {
+    return SECOND_PAGE_DEFAULT_TRACKER_BUTTONS.map((button, index) =>
+      deriveTrackerButton({ ...button, position: pageStart + index }, symbols),
+    );
+  }
+
+  return Array.from({ length: TRACKER_BUTTONS_PER_PAGE }, (_, slotIndex) =>
+    deriveTrackerButton(
+      {
+        id: `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`,
+        label: `Other ${slotIndex + 1}`,
+        icon_key: 'help-circle',
+        color_key: 'slate',
+        position: pageStart + slotIndex,
+      },
+      symbols,
+    ),
+  );
+}
+
+export function getTrackerButtonPageCount(buttons: { position: number }[]): number {
+  return Math.max(1, Math.ceil(buttons.length / TRACKER_BUTTONS_PER_PAGE));
+}
+
+export function getTrackerButtonsForPage<T extends { position: number }>(buttons: T[], pageIndex: number): T[] {
+  const orderedButtons = sortTrackerButtons(buttons);
+  const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
+  return orderedButtons.slice(start, start + TRACKER_BUTTONS_PER_PAGE);
 }

@@ -33,11 +33,16 @@ import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 import {
   DEFAULT_TRACKER_BUTTONS,
   DEFAULT_TRACKER_SYMBOLS,
+  createTrackerButtonsForPage,
   deriveTrackerButton,
+  getTrackerButtonPageCount,
+  getTrackerButtonsForPage,
   getTrackerButtonColorClass,
   getTrackerButtonIcon,
+  MAX_TRACKER_BUTTON_PAGES,
   normalizeTrackerButtons,
   sortTrackerButtons,
+  TRACKER_BUTTONS_PER_PAGE,
   type TrackerButtonConfig,
   type TrackerButtonsResponse,
   type TrackerButtonUpdate,
@@ -46,6 +51,7 @@ import {
 
 const TOKEN_STORAGE_KEY = 'baby-tracker-auth-token';
 const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
+const TRACKER_PAGE_STORAGE_KEY = 'baby-tracker-selected-page';
 const NOTE_SHEET_AUTO_DISMISS_MS = 5000;
 const TRACKER_BUTTON_AUTOSAVE_DELAY_MS = 600;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -114,6 +120,11 @@ function serializeTrackerButtonsPayload(buttons: TrackerButtonConfig[]) {
   return JSON.stringify(buildTrackerButtonsPayload(buttons).buttons);
 }
 
+function getStoredTrackerPageIndex() {
+  const storedValue = Number(localStorage.getItem(TRACKER_PAGE_STORAGE_KEY) ?? '0');
+  return Number.isFinite(storedValue) && storedValue >= 0 ? storedValue : 0;
+}
+
 function parseEmails(input: string): string[] {
   return Array.from(
     new Set(
@@ -179,6 +190,7 @@ export default function App() {
   const [inputValue, setInputValue] = useState('');
   const [pendingLogs, setPendingLogs] = useState<PendingLogItem[]>([]);
   const [activeView, setActiveView] = useState<'tracker' | 'settings'>('tracker');
+  const [trackerPageIndex, setTrackerPageIndex] = useState(() => getStoredTrackerPageIndex());
   const [settingsTab, setSettingsTab] = useState<'calendar' | 'buttons'>('calendar');
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
@@ -216,11 +228,26 @@ export default function App() {
       })),
     [trackerButtons],
   );
+  const trackerPageCount = useMemo(() => getTrackerButtonPageCount(trackerButtons), [trackerButtons]);
+  const visibleActivities = useMemo(
+    () => activities.slice(trackerPageIndex * TRACKER_BUTTONS_PER_PAGE, (trackerPageIndex + 1) * TRACKER_BUTTONS_PER_PAGE),
+    [activities, trackerPageIndex],
+  );
   const orderedDraftButtons = useMemo(
     () => sortTrackerButtons(settingsButtonsDraft),
     [settingsButtonsDraft],
   );
-  const selectedDraftButton = orderedDraftButtons.find((button) => button.id === selectedButtonId) ?? orderedDraftButtons[0] ?? null;
+  const settingsButtonPageCount = useMemo(
+    () => getTrackerButtonPageCount(settingsButtonsDraft),
+    [settingsButtonsDraft],
+  );
+  const currentDraftButtonsPage = useMemo(
+    () => getTrackerButtonsForPage(orderedDraftButtons, trackerPageIndex),
+    [orderedDraftButtons, trackerPageIndex],
+  );
+  const displayedTrackerPageCount = Math.max(trackerPageCount, settingsButtonPageCount);
+  const selectedDraftButton =
+    currentDraftButtonsPage.find((button) => button.id === selectedButtonId) ?? currentDraftButtonsPage[0] ?? null;
   const filteredSymbols = useMemo(() => {
     const query = symbolSearch.trim().toLowerCase();
     if (!query) {
@@ -316,6 +343,7 @@ export default function App() {
         setTrackerButtons(nextButtons);
         setSettingsButtonsDraft(nextButtons);
         setAvailableSymbols(trackerButtonsResponse.data.available_symbols);
+        setTrackerPageIndex(Math.min(getStoredTrackerPageIndex(), getTrackerButtonPageCount(nextButtons) - 1));
         setSelectedButtonId(nextButtons[0]?.id ?? 'bottle');
         setButtonsSaveError(null);
         latestButtonsPayloadRef.current = nextButtonsPayload;
@@ -329,6 +357,27 @@ export default function App() {
 
     void fetchAccount();
   }, [authHeaders, clearAuth, token]);
+
+  useEffect(() => {
+    if (authLoading) {
+      return;
+    }
+    setTrackerPageIndex((current) => Math.min(current, trackerPageCount - 1));
+  }, [authLoading, trackerPageCount]);
+
+  useEffect(() => {
+    localStorage.setItem(TRACKER_PAGE_STORAGE_KEY, trackerPageIndex.toString());
+  }, [trackerPageIndex]);
+
+  useEffect(() => {
+    if (currentDraftButtonsPage.length === 0) {
+      return;
+    }
+
+    if (!currentDraftButtonsPage.some((button) => button.id === selectedButtonId)) {
+      setSelectedButtonId(currentDraftButtonsPage[0].id);
+    }
+  }, [currentDraftButtonsPage, selectedButtonId]);
 
   const refreshRunningActivities = useCallback(async () => {
     if (!authHeaders) {
@@ -464,6 +513,40 @@ export default function App() {
     );
   }, [availableSymbols]);
 
+  const handleAddButtonsPage = useCallback(() => {
+    if (settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES) {
+      return;
+    }
+
+    const nextPageIndex = settingsButtonPageCount;
+    const nextPageButtons = createTrackerButtonsForPage(nextPageIndex, availableSymbols);
+    setSettingsButtonsDraft((currentButtons) =>
+      [...sortTrackerButtons(currentButtons), ...nextPageButtons].map((button, index) => ({
+        ...button,
+        position: index,
+      })),
+    );
+    setTrackerPageIndex(nextPageIndex);
+    setSelectedButtonId(nextPageButtons[0]?.id ?? selectedButtonId);
+  }, [availableSymbols, selectedButtonId, settingsButtonPageCount]);
+
+  const handleDeleteButtonsPage = useCallback(() => {
+    if (settingsButtonPageCount <= 1) {
+      return;
+    }
+
+    const pageStart = trackerPageIndex * TRACKER_BUTTONS_PER_PAGE;
+    setSettingsButtonsDraft((currentButtons) =>
+      sortTrackerButtons(currentButtons)
+        .filter((_, index) => index < pageStart || index >= pageStart + TRACKER_BUTTONS_PER_PAGE)
+        .map((button, index) => ({
+          ...button,
+          position: index,
+        })),
+    );
+    setTrackerPageIndex((current) => Math.min(current, settingsButtonPageCount - 2));
+  }, [settingsButtonPageCount, trackerPageIndex]);
+
   const handleButtonsDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) {
@@ -472,19 +555,30 @@ export default function App() {
 
     setSettingsButtonsDraft((currentButtons) => {
       const orderedButtons = sortTrackerButtons(currentButtons);
-      const oldIndex = orderedButtons.findIndex((button) => button.id === active.id);
-      const newIndex = orderedButtons.findIndex((button) => button.id === over.id);
+      const pageStart = trackerPageIndex * TRACKER_BUTTONS_PER_PAGE;
+      const pageButtons = orderedButtons.slice(pageStart, pageStart + TRACKER_BUTTONS_PER_PAGE);
+      const oldIndex = pageButtons.findIndex((button) => button.id === active.id);
+      const newIndex = pageButtons.findIndex((button) => button.id === over.id);
 
       if (oldIndex < 0 || newIndex < 0) {
         return currentButtons;
       }
 
-      return arrayMove(orderedButtons, oldIndex, newIndex).map((button, index) => ({
+      const reorderedPage = arrayMove(pageButtons, oldIndex, newIndex).map((button, index) => ({
+        ...button,
+        position: pageStart + index,
+      }));
+
+      return [
+        ...orderedButtons.slice(0, pageStart),
+        ...reorderedPage,
+        ...orderedButtons.slice(pageStart + TRACKER_BUTTONS_PER_PAGE),
+      ].map((button, index) => ({
         ...button,
         position: index,
       }));
     });
-  }, []);
+  }, [trackerPageIndex]);
 
   const handleSaveButtons = useCallback(async (buttonsToSave: TrackerButtonConfig[], showSuccessToast = false) => {
     if (!authHeaders) {
@@ -973,8 +1067,31 @@ export default function App() {
     <div className="flex min-h-screen min-h-[100dvh] flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-blue-100 dark:selection:bg-blue-900">
       <header className="sticky top-0 inset-x-0 shrink-0 bg-white/85 dark:bg-slate-900/85 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 z-10 px-4 py-3">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Baby Tracker</h1>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Baby Tracker</h1>
+              {displayedTrackerPageCount > 1 && (
+                <div className="inline-flex items-center gap-1">
+                  {Array.from({ length: displayedTrackerPageCount }, (_, pageIndex) => (
+                    <button
+                      key={pageIndex}
+                      type="button"
+                      onClick={() => setTrackerPageIndex(pageIndex)}
+                      className={clsx(
+                        'flex h-7 w-7 items-center justify-center rounded-lg border text-[11px] font-bold transition',
+                        trackerPageIndex === pageIndex
+                          ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-950/30 dark:text-blue-300'
+                          : 'border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400',
+                      )}
+                      aria-label={`Show tracker page ${pageIndex + 1}`}
+                      title={`Page ${pageIndex + 1}`}
+                    >
+                      {pageIndex + 1}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
@@ -1024,7 +1141,7 @@ export default function App() {
               <div>
                 <h2 className="text-xl font-bold">Settings</h2>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                  Manage your household calendar and the 8 tracked buttons on the main grid.
+                  Manage your household calendar and the tracked button pages on the main grid.
                 </p>
               </div>
               <div className="flex rounded-2xl bg-slate-100 dark:bg-slate-800 p-1">
@@ -1167,15 +1284,55 @@ export default function App() {
                   <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
                     <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Tracked buttons</h3>
                     <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                      Drag to reorder. Click a button to edit its label or icon below. Changes save automatically.
+                      Edit one page at a time. Drag to reorder and click a button to edit its label or icon below. Changes save automatically.
                     </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-slate-800">
+                      {Array.from({ length: settingsButtonPageCount }, (_, pageIndex) => (
+                        <button
+                          key={pageIndex}
+                          type="button"
+                          onClick={() => setTrackerPageIndex(pageIndex)}
+                          className={clsx(
+                            'flex h-9 w-9 items-center justify-center rounded-xl text-sm font-semibold transition',
+                            trackerPageIndex === pageIndex
+                              ? 'bg-white text-slate-900 shadow dark:bg-slate-700 dark:text-white'
+                              : 'text-slate-500 dark:text-slate-400',
+                          )}
+                          aria-label={`Show tracker page ${pageIndex + 1}`}
+                          title={`Page ${pageIndex + 1}`}
+                        >
+                          {pageIndex + 1}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleAddButtonsPage}
+                        disabled={settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES}
+                        className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white dark:bg-slate-100 dark:text-slate-900"
+                      >
+                        Add page
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeleteButtonsPage}
+                        disabled={settingsButtonPageCount <= 1}
+                        className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                      >
+                        Delete page
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-4">
                     <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={handleButtonsDragEnd}>
                       <div className="grid justify-items-center gap-x-4 gap-y-4 sm:gap-x-6 sm:gap-y-6 grid-cols-2 md:grid-cols-4">
-                        <SortableContext items={orderedDraftButtons.map((button) => button.id)} strategy={rectSortingStrategy}>
-                          {orderedDraftButtons.map((button) => (
+                        <SortableContext items={currentDraftButtonsPage.map((button) => button.id)} strategy={rectSortingStrategy}>
+                          {currentDraftButtonsPage.map((button) => (
                             <SortableDraftButtonCard
                               key={button.id}
                               button={button}
@@ -1301,7 +1458,7 @@ export default function App() {
             </div>
 
             <div className="grid flex-1 min-h-0 content-start justify-items-center gap-x-4 gap-y-4 pt-1 sm:content-center md:grid-cols-4 md:gap-x-6 md:gap-y-8 grid-cols-2">
-              {activities.map((activity) => (
+              {visibleActivities.map((activity) => (
                 <ActivityButton
                   key={`${activity.id}-${runningActivities[activity.id] ?? 'idle'}`}
                   activity={activity}
