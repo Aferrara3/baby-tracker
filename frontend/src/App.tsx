@@ -30,6 +30,7 @@ import { clsx } from 'clsx';
 import ActivityButton from './components/ActivityButton';
 import Toast from './components/Toast';
 import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
+import { THEME_PALETTE_OPTIONS, type ThemePaletteKey } from './theme';
 import {
   DEFAULT_TRACKER_BUTTONS,
   DEFAULT_TRACKER_SYMBOLS,
@@ -54,6 +55,7 @@ const INTERACTION_TIP_STORAGE_KEY = 'baby-tracker-interaction-tip-hidden';
 const TRACKER_PAGE_STORAGE_KEY = 'baby-tracker-selected-page';
 const NOTE_SHEET_AUTO_DISMISS_MS = 5000;
 const TRACKER_BUTTON_AUTOSAVE_DELAY_MS = 600;
+const PALETTE_AUTOSAVE_DELAY_MS = 500;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 interface Activity {
@@ -73,6 +75,7 @@ interface Account {
   id: number;
   username: string;
   baby_name: string | null;
+  color_palette: ThemePaletteKey;
   share_emails: string[];
   google_calendar_id: string | null;
   google_calendar_summary: string | null;
@@ -160,16 +163,14 @@ function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraft
       }}
       className={clsx(
         'flex flex-col items-center gap-2 rounded-2xl border p-2 text-center transition cursor-grab active:cursor-grabbing',
-        isSelected
-          ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-950/30'
-          : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/40 dark:hover:border-slate-600',
+        isSelected ? 'app-page-button-active' : 'app-surface hover:opacity-90',
         isDragging && 'shadow-xl opacity-90',
       )}
     >
       <div className={clsx('flex h-[4.5rem] w-[4.5rem] items-center justify-center rounded-2xl shadow-md md:h-24 md:w-24', getTrackerButtonColorClass(button.color_key))}>
         {createElement(iconComponent, { size: 30, className: 'text-white', strokeWidth: 2.4 })}
       </div>
-      <p className="max-w-full truncate text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200 md:text-sm">
+      <p className="app-text max-w-full truncate text-[11px] font-bold uppercase tracking-wide md:text-sm">
         {button.label.trim() || 'Untitled'}
       </p>
     </button>
@@ -191,8 +192,9 @@ export default function App() {
   const [pendingLogs, setPendingLogs] = useState<PendingLogItem[]>([]);
   const [activeView, setActiveView] = useState<'tracker' | 'settings'>('tracker');
   const [trackerPageIndex, setTrackerPageIndex] = useState(() => getStoredTrackerPageIndex());
-  const [settingsTab, setSettingsTab] = useState<'calendar' | 'buttons'>('calendar');
+  const [settingsTab, setSettingsTab] = useState<'calendar' | 'buttons' | 'app'>('calendar');
   const [settingsBabyName, setSettingsBabyName] = useState('');
+  const [settingsPalette, setSettingsPalette] = useState<ThemePaletteKey>('default');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
   const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
   const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
@@ -202,12 +204,16 @@ export default function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [isSavingButtons, setIsSavingButtons] = useState(false);
   const [buttonsSaveError, setButtonsSaveError] = useState<string | null>(null);
+  const [isSavingPalette, setIsSavingPalette] = useState(false);
+  const [paletteSaveError, setPaletteSaveError] = useState<string | null>(null);
   const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
   const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
+  const paletteAutosaveTimeoutRef = useRef<number | null>(null);
   const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
   const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
   const buttonsSaveRequestIdRef = useRef(0);
+  const paletteSaveRequestIdRef = useRef(0);
   const dragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -282,6 +288,7 @@ export default function App() {
     setToken(nextToken);
     setAccount(nextAccount);
     setSettingsBabyName(nextAccount.baby_name ?? '');
+    setSettingsPalette(nextAccount.color_palette ?? 'default');
     setSettingsShareEmails(nextAccount.share_emails.join(', '));
     setSettingsTab('calendar');
   };
@@ -298,6 +305,7 @@ export default function App() {
     setTrackerButtons(DEFAULT_TRACKER_BUTTONS);
     setSettingsButtonsDraft(DEFAULT_TRACKER_BUTTONS);
     setAvailableSymbols(DEFAULT_TRACKER_SYMBOLS);
+    setSettingsPalette('default');
     setSelectedButtonId(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
     setSymbolSearch('');
     setIsSavingButtons(false);
@@ -334,6 +342,7 @@ export default function App() {
         ]);
         setAccount(accountResponse.data);
         setSettingsBabyName(accountResponse.data.baby_name ?? '');
+        setSettingsPalette(accountResponse.data.color_palette ?? 'default');
         setSettingsShareEmails(accountResponse.data.share_emails.join(', '));
         const nextButtons = normalizeTrackerButtons(
           trackerButtonsResponse.data.buttons,
@@ -489,6 +498,7 @@ export default function App() {
     setAccount(response.data);
     if (!preserveSettingsDrafts) {
       setSettingsBabyName(response.data.baby_name ?? '');
+      setSettingsPalette(response.data.color_palette ?? 'default');
       setSettingsShareEmails(response.data.share_emails.join(', '));
     }
   }, [authHeaders]);
@@ -514,21 +524,30 @@ export default function App() {
   }, [availableSymbols]);
 
   const handleAddButtonsPage = useCallback(() => {
-    if (settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES) {
-      return;
-    }
+    let nextPageIndex: number | null = null;
+    let nextPageButtons: TrackerButtonConfig[] = [];
 
-    const nextPageIndex = settingsButtonPageCount;
-    const nextPageButtons = createTrackerButtonsForPage(nextPageIndex, availableSymbols);
-    setSettingsButtonsDraft((currentButtons) =>
-      [...sortTrackerButtons(currentButtons), ...nextPageButtons].map((button, index) => ({
+    setSettingsButtonsDraft((currentButtons) => {
+      const orderedButtons = sortTrackerButtons(currentButtons);
+      const currentPageCount = getTrackerButtonPageCount(orderedButtons);
+      if (currentPageCount >= MAX_TRACKER_BUTTON_PAGES) {
+        return currentButtons;
+      }
+
+      nextPageIndex = currentPageCount;
+      nextPageButtons = createTrackerButtonsForPage(currentPageCount, availableSymbols, orderedButtons);
+
+      return [...orderedButtons, ...nextPageButtons].map((button, index) => ({
         ...button,
         position: index,
-      })),
-    );
-    setTrackerPageIndex(nextPageIndex);
-    setSelectedButtonId(nextPageButtons[0]?.id ?? selectedButtonId);
-  }, [availableSymbols, selectedButtonId, settingsButtonPageCount]);
+      }));
+    });
+
+    if (nextPageIndex !== null) {
+      setTrackerPageIndex(nextPageIndex);
+      setSelectedButtonId(nextPageButtons[0]?.id ?? selectedButtonId);
+    }
+  }, [availableSymbols, selectedButtonId]);
 
   const handleDeleteButtonsPage = useCallback(() => {
     if (settingsButtonPageCount <= 1) {
@@ -546,6 +565,14 @@ export default function App() {
     );
     setTrackerPageIndex((current) => Math.min(current, settingsButtonPageCount - 2));
   }, [settingsButtonPageCount, trackerPageIndex]);
+
+  const handleResetButtonsToDefault = useCallback(() => {
+    const defaultButtons = normalizeTrackerButtons(DEFAULT_TRACKER_BUTTONS, availableSymbols);
+    setSettingsButtonsDraft(defaultButtons);
+    setTrackerPageIndex(0);
+    setSelectedButtonId(defaultButtons[0]?.id ?? 'bottle');
+    setButtonsSaveError(null);
+  }, [availableSymbols]);
 
   const handleButtonsDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
@@ -625,9 +652,14 @@ export default function App() {
         addToast('Buttons saved', 'success');
       }
     } catch (error) {
+      const errorDetail =
+        axios.isAxiosError(error) && typeof error.response?.data?.detail === 'string'
+          ? error.response.data.detail
+          : null;
+
       if (latestButtonsPayloadRef.current === payloadKey) {
-        setButtonsSaveError('Failed to save changes');
-        addToast('Failed to save buttons', 'error');
+        setButtonsSaveError(errorDetail ?? 'Failed to save changes');
+        addToast(errorDetail ?? 'Failed to save buttons', 'error');
       }
       console.error('Tracker button settings error:', error);
     } finally {
@@ -700,6 +732,7 @@ export default function App() {
       `${API_BASE}/account/settings`,
       {
         baby_name: settingsBabyName || null,
+        color_palette: settingsPalette,
         share_emails: parseEmails(settingsShareEmails),
       },
       { headers: authHeaders },
@@ -707,6 +740,23 @@ export default function App() {
     setAccount(response.data);
     return response.data;
   };
+
+  const savePaletteRequest = useCallback(
+    async (palette: ThemePaletteKey) => {
+      if (!authHeaders) {
+        return null;
+      }
+
+      const response = await axios.patch<Account>(
+        `${API_BASE}/account/settings`,
+        { color_palette: palette },
+        { headers: authHeaders },
+      );
+      setAccount(response.data);
+      return response.data;
+    },
+    [authHeaders],
+  );
 
   const handleSaveSettings = async () => {
     if (!authHeaders) {
@@ -724,6 +774,63 @@ export default function App() {
       setIsBusy(false);
     }
   };
+
+  useEffect(() => {
+    document.documentElement.dataset.palette = settingsPalette;
+    return () => {
+      delete document.documentElement.dataset.palette;
+    };
+  }, [settingsPalette]);
+
+  useEffect(() => {
+    if (!authHeaders || !account) {
+      return undefined;
+    }
+
+    if ((account.color_palette ?? 'default') === settingsPalette) {
+      setPaletteSaveError(null);
+      if (paletteAutosaveTimeoutRef.current !== null) {
+        window.clearTimeout(paletteAutosaveTimeoutRef.current);
+        paletteAutosaveTimeoutRef.current = null;
+      }
+      return undefined;
+    }
+
+    if (paletteAutosaveTimeoutRef.current !== null) {
+      window.clearTimeout(paletteAutosaveTimeoutRef.current);
+    }
+
+    paletteAutosaveTimeoutRef.current = window.setTimeout(() => {
+      paletteAutosaveTimeoutRef.current = null;
+      const requestId = paletteSaveRequestIdRef.current + 1;
+      paletteSaveRequestIdRef.current = requestId;
+      setIsSavingPalette(true);
+      setPaletteSaveError(null);
+
+      void (async () => {
+        try {
+          await savePaletteRequest(settingsPalette);
+        } catch (error) {
+          if (requestId === paletteSaveRequestIdRef.current) {
+            setPaletteSaveError('Failed to save palette');
+            addToast('Failed to save palette', 'error');
+          }
+          console.error('Palette settings error:', error);
+        } finally {
+          if (requestId === paletteSaveRequestIdRef.current) {
+            setIsSavingPalette(false);
+          }
+        }
+      })();
+    }, PALETTE_AUTOSAVE_DELAY_MS);
+
+    return () => {
+      if (paletteAutosaveTimeoutRef.current !== null) {
+        window.clearTimeout(paletteAutosaveTimeoutRef.current);
+        paletteAutosaveTimeoutRef.current = null;
+      }
+    };
+  }, [account, addToast, authHeaders, savePaletteRequest, settingsPalette]);
 
   const handleEnableSync = async () => {
     if (!authHeaders) {
@@ -987,33 +1094,33 @@ export default function App() {
   }, [activePendingLog, handleInputDismiss, inputValue]);
 
   if (authLoading) {
-    return <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-700">Loading…</div>;
+    return <div className="app-shell min-h-screen grid place-items-center app-muted">Loading…</div>;
   }
 
   if (!account) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-6 py-10">
-        <div className="max-w-md mx-auto bg-white dark:bg-slate-900 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-800 p-6 space-y-6">
+      <div className="app-shell min-h-screen px-6 py-10">
+        <div className="app-surface max-w-md mx-auto rounded-3xl border p-6 shadow-xl space-y-6">
           <div className="space-y-2 text-center">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-sm font-semibold">
+            <div className="app-accent-soft inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold">
               <ShieldCheck size={16} />
               Household sign-in
             </div>
             <h1 className="text-3xl font-bold">Baby Tracker</h1>
-            <p className="text-slate-500 dark:text-slate-400 text-sm">
+            <p className="app-muted text-sm">
               Create a household account to keep events and calendars separated.
             </p>
           </div>
 
-          <div className="flex rounded-2xl bg-slate-100 dark:bg-slate-800 p-1">
+          <div className="app-subtle flex rounded-2xl p-1">
             <button
-              className={clsx('flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition', authMode === 'login' ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white' : 'text-slate-500')}
+              className={clsx('flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition', authMode === 'login' ? 'app-surface shadow app-text' : 'app-muted')}
               onClick={() => setAuthMode('login')}
             >
               Sign in
             </button>
             <button
-              className={clsx('flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition', authMode === 'register' ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white' : 'text-slate-500')}
+              className={clsx('flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition', authMode === 'register' ? 'app-surface shadow app-text' : 'app-muted')}
               onClick={() => setAuthMode('register')}
             >
               Create account
@@ -1022,33 +1129,33 @@ export default function App() {
 
           <div className="space-y-4">
             <input
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="Username"
-              className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
-            />
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="Username"
+                className="app-input app-focus w-full rounded-2xl border px-4 py-3"
+              />
             <input
               type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Password"
-              className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
-            />
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Password"
+                className="app-input app-focus w-full rounded-2xl border px-4 py-3"
+              />
             {authMode === 'register' && (
               <input
-                value={registerBabyName}
-                onChange={(event) => setRegisterBabyName(event.target.value)}
-                placeholder="Baby name (optional)"
-                className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            )}
-            <button
-              onClick={() => void handleAuthSubmit()}
-              disabled={isBusy}
-              className="w-full rounded-2xl bg-blue-600 text-white font-semibold px-4 py-3 hover:bg-blue-700 disabled:opacity-60"
-            >
-              {isBusy ? 'Working…' : authMode === 'register' ? 'Create household' : 'Sign in'}
-            </button>
+                  value={registerBabyName}
+                  onChange={(event) => setRegisterBabyName(event.target.value)}
+                  placeholder="Baby name (optional)"
+                  className="app-input app-focus w-full rounded-2xl border px-4 py-3"
+                />
+              )}
+              <button
+                onClick={() => void handleAuthSubmit()}
+                disabled={isBusy}
+                className="app-primary-button w-full rounded-2xl px-4 py-3 font-semibold disabled:opacity-60"
+              >
+                {isBusy ? 'Working…' : authMode === 'register' ? 'Create household' : 'Sign in'}
+              </button>
           </div>
         </div>
 
@@ -1064,12 +1171,12 @@ export default function App() {
   }
 
   return (
-    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-blue-100 dark:selection:bg-blue-900">
-      <header className="sticky top-0 inset-x-0 shrink-0 bg-white/85 dark:bg-slate-900/85 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 z-10 px-4 py-3">
+    <div className="app-shell flex min-h-screen min-h-[100dvh] flex-col font-sans selection:bg-[var(--app-accent-soft)]">
+      <header className="app-header sticky top-0 inset-x-0 z-10 shrink-0 border-b px-4 py-3 backdrop-blur-md">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Baby Tracker</h1>
+              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">Baby Tracker</h1>
               {displayedTrackerPageCount > 1 && (
                 <div className="inline-flex items-center gap-1">
                   {Array.from({ length: displayedTrackerPageCount }, (_, pageIndex) => (
@@ -1079,9 +1186,7 @@ export default function App() {
                       onClick={() => setTrackerPageIndex(pageIndex)}
                       className={clsx(
                         'flex h-7 w-7 items-center justify-center rounded-lg border text-[11px] font-bold transition',
-                        trackerPageIndex === pageIndex
-                          ? 'border-blue-500 bg-blue-50 text-blue-700 dark:border-blue-400 dark:bg-blue-950/30 dark:text-blue-300'
-                          : 'border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400',
+                        trackerPageIndex === pageIndex ? 'app-page-button-active' : 'app-page-button',
                       )}
                       aria-label={`Show tracker page ${pageIndex + 1}`}
                       title={`Page ${pageIndex + 1}`}
@@ -1093,7 +1198,7 @@ export default function App() {
               )}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="app-muted text-xs">
                 {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
               </p>
               <button
@@ -1103,10 +1208,8 @@ export default function App() {
                   setActiveView('settings');
                 }}
                 className={clsx(
-                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition hover:opacity-90',
-                  account.calendar_connected
-                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+                  'app-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition',
+                  account.calendar_connected ? 'app-status-pill-connected' : 'app-status-pill-local',
                 )}
                 aria-label="Open calendar settings"
               >
@@ -1118,14 +1221,14 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setActiveView(activeView === 'tracker' ? 'settings' : 'tracker')}
-              className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700"
+              className="app-icon-button rounded-xl p-2 transition"
               aria-label="Toggle settings"
             >
               {activeView === 'tracker' ? <Settings size={18} /> : <X size={18} />}
             </button>
             <button
               onClick={() => void handleLogout()}
-              className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700"
+              className="app-icon-button rounded-xl p-2 transition"
               aria-label="Sign out"
             >
               <LogOut size={18} />
@@ -1137,21 +1240,19 @@ export default function App() {
       <main className="mx-auto flex w-full max-w-3xl min-h-0 flex-1 flex-col px-4 pb-4 pt-3 sm:px-6">
         {activeView === 'settings' ? (
           <section className="mx-auto w-full max-w-xl pb-6">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-lg p-6 space-y-5">
+            <div className="app-surface rounded-3xl border p-6 shadow-lg space-y-5">
               <div>
                 <h2 className="text-xl font-bold">Settings</h2>
-                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                  Manage your household calendar and the tracked button pages on the main grid.
+                <p className="app-muted mt-1 text-sm">
+                  Manage calendar sync, tracked button pages, and app-wide appearance.
                 </p>
               </div>
-              <div className="flex rounded-2xl bg-slate-100 dark:bg-slate-800 p-1">
+              <div className="app-subtle flex rounded-2xl p-1">
                 <button
                   onClick={() => setSettingsTab('calendar')}
                   className={clsx(
                     'flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition',
-                    settingsTab === 'calendar'
-                      ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white'
-                      : 'text-slate-500 dark:text-slate-400',
+                    settingsTab === 'calendar' ? 'app-surface shadow app-text' : 'app-muted',
                   )}
                 >
                   Calendar
@@ -1160,12 +1261,19 @@ export default function App() {
                   onClick={() => setSettingsTab('buttons')}
                   className={clsx(
                     'flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition',
-                    settingsTab === 'buttons'
-                      ? 'bg-white dark:bg-slate-700 shadow text-slate-900 dark:text-white'
-                      : 'text-slate-500 dark:text-slate-400',
+                    settingsTab === 'buttons' ? 'app-surface shadow app-text' : 'app-muted',
                   )}
                 >
                   Buttons
+                </button>
+                <button
+                  onClick={() => setSettingsTab('app')}
+                  className={clsx(
+                    'flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition',
+                    settingsTab === 'app' ? 'app-surface shadow app-text' : 'app-muted',
+                  )}
+                >
+                  App
                 </button>
               </div>
 
@@ -1178,7 +1286,7 @@ export default function App() {
                         value={settingsBabyName}
                         onChange={(event) => setSettingsBabyName(event.target.value)}
                         placeholder="Baby name"
-                        className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                        className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
                     </div>
                     <div>
@@ -1188,28 +1296,28 @@ export default function App() {
                         onChange={(event) => setSettingsShareEmails(event.target.value)}
                         placeholder="mom@example.com, dad@example.com"
                         rows={4}
-                        className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                        className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                      <p className="app-muted mt-2 text-xs">
                         Enable sync will save the current baby name and share-email edits automatically first.
                       </p>
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-800/50 space-y-2 text-sm">
+                  <div className="app-subtle rounded-2xl border p-4 text-sm space-y-2">
                     <div className="flex items-center justify-between gap-3">
                       <span className="font-semibold">Sync status</span>
-                      <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', account.calendar_connected ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}>
+                      <span className={clsx('app-status-pill px-3 py-1 rounded-full text-xs font-semibold', account.calendar_connected ? 'app-status-pill-connected' : 'app-status-pill-local')}>
                         {account.calendar_connected ? 'Connected' : 'Local only'}
                       </span>
                     </div>
                     {account.google_calendar_summary && <p>Calendar: {account.google_calendar_summary}</p>}
                     {account.calendar_url && (
-                      <a href={account.calendar_url} target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 underline">
+                      <a href={account.calendar_url} target="_blank" rel="noreferrer" className="app-accent-text underline">
                         Open in Google Calendar
                       </a>
                     )}
-                    <p className="text-slate-500 dark:text-slate-400">
+                    <p className="app-muted">
                       {account.service_managed_calendar
                         ? 'This calendar is owned by the service account and shared back to your saved emails.'
                         : account.calendar_connected
@@ -1217,7 +1325,7 @@ export default function App() {
                           : 'Provisioning creates a service-account-owned calendar for this household.'}
                     </p>
                     {account.google_last_synced_at && (
-                      <p className="text-slate-500 dark:text-slate-400">
+                      <p className="app-muted">
                         Last Google pull sync: {new Date(account.google_last_synced_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
                       </p>
                     )}
@@ -1227,30 +1335,30 @@ export default function App() {
                     <button
                       onClick={() => void handleSaveSettings()}
                       disabled={isBusy}
-                      className="rounded-2xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold px-4 py-3 disabled:opacity-60"
+                      className="app-primary-button rounded-2xl px-4 py-3 font-semibold disabled:opacity-60"
                     >
                       Save settings
                     </button>
                     <button
                       onClick={() => void handleEnableSync()}
                       disabled={isBusy}
-                      className="rounded-2xl bg-blue-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                      className="app-primary-button rounded-2xl px-4 py-3 font-semibold disabled:opacity-60"
                     >
                       Enable sync
                     </button>
                     <button
                       onClick={() => void handleReshare()}
                       disabled={isBusy}
-                      className="rounded-2xl bg-emerald-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                      className="rounded-2xl bg-emerald-600 px-4 py-3 font-semibold text-white disabled:opacity-60"
                     >
                       Re-share calendar
                     </button>
                   </div>
 
-                  <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 p-4 space-y-3">
+                  <div className="rounded-2xl border border-dashed p-4 space-y-3 [border-color:var(--app-border)]">
                     <div>
-                      <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Quick tools</h3>
-                      <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                      <h3 className="app-muted text-sm font-bold uppercase tracking-wide">Quick tools</h3>
+                      <p className="app-muted mt-1 text-sm">
                         Handy cleanup and visualization shortcuts scoped only to this signed-in household.
                       </p>
                     </div>
@@ -1258,48 +1366,46 @@ export default function App() {
                       <button
                         onClick={() => void handleClearToday()}
                         disabled={isBusy}
-                        className="rounded-2xl bg-rose-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                        className="rounded-2xl bg-rose-600 px-4 py-3 font-semibold text-white disabled:opacity-60"
                       >
                         Delete today's events
                       </button>
                       <button
                         onClick={() => void handleSimulateDay()}
                         disabled={isBusy || !account.calendar_connected}
-                        className="rounded-2xl bg-violet-600 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                        className="rounded-2xl bg-violet-600 px-4 py-3 font-semibold text-white disabled:opacity-60"
                       >
                         Simulate sample day
                       </button>
                       <button
                         onClick={() => void handleForceSyncFromGoogle()}
                         disabled={isBusy || !account.calendar_connected}
-                        className="rounded-2xl bg-violet-700 text-white font-semibold px-4 py-3 disabled:opacity-60"
+                        className="rounded-2xl bg-violet-700 px-4 py-3 font-semibold text-white disabled:opacity-60"
                       >
                         Force sync now
                       </button>
                     </div>
                   </div>
                 </>
-              ) : (
+              ) : settingsTab === 'buttons' ? (
                 <div className="space-y-4">
-                  <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 p-4">
-                    <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Tracked buttons</h3>
-                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  <div className="app-subtle rounded-2xl border p-4">
+                    <h3 className="app-muted text-sm font-bold uppercase tracking-wide">Tracked buttons</h3>
+                    <p className="app-muted mt-1 text-sm">
                       Edit one page at a time. Drag to reorder and click a button to edit its label or icon below. Changes save automatically.
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-slate-800">
+                    <div className="app-subtle inline-flex rounded-2xl p-1">
                       {Array.from({ length: settingsButtonPageCount }, (_, pageIndex) => (
                         <button
                           key={pageIndex}
                           type="button"
                           onClick={() => setTrackerPageIndex(pageIndex)}
                           className={clsx(
-                            'flex h-9 w-9 items-center justify-center rounded-xl text-sm font-semibold transition',
-                            trackerPageIndex === pageIndex
-                              ? 'bg-white text-slate-900 shadow dark:bg-slate-700 dark:text-white'
-                              : 'text-slate-500 dark:text-slate-400',
+                            'flex h-9 w-9 items-center justify-center rounded-xl border text-sm font-semibold transition',
+                            trackerPageIndex === pageIndex ? 'app-page-button-active shadow-sm' : 'app-page-button',
                           )}
                           aria-label={`Show tracker page ${pageIndex + 1}`}
                           title={`Page ${pageIndex + 1}`}
@@ -1308,12 +1414,12 @@ export default function App() {
                         </button>
                       ))}
                     </div>
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2">
                       <button
                         type="button"
                         onClick={handleAddButtonsPage}
                         disabled={settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES}
-                        className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white dark:bg-slate-100 dark:text-slate-900"
+                        className="app-primary-button rounded-xl px-3 py-2 text-sm font-semibold disabled:opacity-60"
                       >
                         Add page
                       </button>
@@ -1321,7 +1427,7 @@ export default function App() {
                         type="button"
                         onClick={handleDeleteButtonsPage}
                         disabled={settingsButtonPageCount <= 1}
-                        className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                        className="app-page-button rounded-xl border px-3 py-2 text-sm font-semibold disabled:opacity-50"
                       >
                         Delete page
                       </button>
@@ -1345,11 +1451,11 @@ export default function App() {
                     </DndContext>
 
                     {selectedDraftButton && (
-                      <div className="space-y-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-4">
+                      <div className="app-surface space-y-4 rounded-2xl border p-4">
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <h3 className="font-semibold">{selectedDraftButton.label}</h3>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">
+                            <p className="app-muted text-sm">
                               Calendar preview: {selectedDraftButton.title}
                             </p>
                           </div>
@@ -1369,9 +1475,9 @@ export default function App() {
                             onChange={(event) => updateDraftButton(selectedDraftButton.id, { label: event.target.value })}
                             maxLength={24}
                             placeholder="Button label"
-                            className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                            className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                           />
-                          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                          <p className="app-muted mt-2 text-xs">
                             Keep it short so it fits cleanly on the main grid.
                           </p>
                         </div>
@@ -1382,7 +1488,7 @@ export default function App() {
                             value={symbolSearch}
                             onChange={(event) => setSymbolSearch(event.target.value)}
                             placeholder="Search work, sleep, food, health..."
-                            className="w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                            className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                           />
                         </div>
 
@@ -1397,9 +1503,7 @@ export default function App() {
                                 onClick={() => updateDraftButton(selectedDraftButton.id, { icon_key: symbol.key })}
                                 className={clsx(
                                   'flex aspect-square items-center justify-center rounded-2xl border p-3 transition',
-                                  isSelected
-                                    ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-950/30'
-                                    : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/40 dark:hover:border-slate-600',
+                                  isSelected ? 'app-page-button-active' : 'app-surface hover:opacity-90',
                                 )}
                                 title={symbol.label}
                                 aria-label={symbol.label}
@@ -1411,13 +1515,13 @@ export default function App() {
                         </div>
 
                         {filteredSymbols.length === 0 && (
-                          <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                          <p className="app-muted rounded-2xl border border-dashed px-4 py-3 text-sm [border-color:var(--app-border)]">
                             No symbols match that search yet.
                           </p>
                         )}
 
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-700 dark:bg-slate-800/40">
-                          <p className={clsx('text-slate-500 dark:text-slate-400', buttonsSaveError && 'text-rose-600 dark:text-rose-400')}>
+                        <div className="app-subtle rounded-2xl border px-4 py-3 text-sm">
+                          <p className={clsx('app-muted', buttonsSaveError && 'text-rose-600 dark:text-rose-400')}>
                             {buttonsSaveError
                               ? buttonsSaveError
                               : isSavingButtons
@@ -1429,6 +1533,68 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={handleResetButtonsToDefault}
+                        className="app-page-button rounded-xl border px-3 py-2 text-sm font-semibold"
+                      >
+                        Reset to default
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="app-subtle rounded-2xl border p-4">
+                    <h3 className="text-sm font-bold uppercase tracking-wide">App look</h3>
+                    <p className="app-muted mt-1 text-sm">
+                      Pick the color palette used across the app shell, settings, and tracker surfaces.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-semibold">Color palette</label>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {THEME_PALETTE_OPTIONS.map((palette) => (
+                        <button
+                          key={palette.key}
+                          type="button"
+                          onClick={() => setSettingsPalette(palette.key)}
+                          className={clsx(
+                            'rounded-2xl border p-4 text-left transition',
+                            settingsPalette === palette.key ? 'app-page-button-active' : 'app-surface hover:opacity-90',
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="font-semibold">{palette.label}</p>
+                              <p className="app-muted mt-1 text-xs">{palette.description}</p>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {palette.swatches.map((swatch) => (
+                                <span
+                                  key={swatch}
+                                  className="h-3 w-3 rounded-full border border-black/5"
+                                  style={{ backgroundColor: swatch }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="app-subtle rounded-2xl border px-4 py-3 text-sm">
+                    <p className={clsx('app-muted', paletteSaveError && 'text-rose-600 dark:text-rose-400')}>
+                      {paletteSaveError
+                        ? paletteSaveError
+                        : isSavingPalette
+                          ? 'Saving palette...'
+                          : (account.color_palette ?? 'default') !== settingsPalette
+                            ? 'Saving automatically...'
+                            : 'Saved automatically.'}
+                    </p>
                   </div>
                 </div>
               )}
@@ -1437,19 +1603,22 @@ export default function App() {
         ) : (
           <section className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain pb-2">
             <div className="shrink-0 space-y-2 text-center">
-              <p className="text-sm font-medium text-slate-500 dark:text-slate-400">What's happening right now?</p>
+              <p className="app-muted text-sm font-medium">What's happening right now?</p>
 
               {showInteractionTip && (
-                <div className="mx-auto flex max-w-md items-center gap-2 rounded-2xl border border-blue-200/80 bg-blue-50/80 px-3 py-2 text-left shadow-sm dark:border-blue-800 dark:bg-blue-950/30">
-                  <div className="rounded-xl bg-blue-100 p-1.5 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300">
+                <div className="app-accent-soft mx-auto flex max-w-md items-center gap-2 rounded-2xl border px-3 py-2 text-left shadow-sm [border-color:var(--app-accent)]">
+                  <div
+                    className="rounded-xl p-1.5"
+                    style={{ backgroundColor: 'color-mix(in srgb, var(--app-accent) 12%, white)' }}
+                  >
                     <HelpCircle size={14} />
                   </div>
-                  <p className="min-w-0 flex-1 text-xs text-slate-600 dark:text-slate-300">
+                  <p className="min-w-0 flex-1 text-xs">
                     Tap to log. Hold to start or stop a timer.
                   </p>
                   <button
                     onClick={hideInteractionTip}
-                    className="rounded-xl bg-white/90 px-2.5 py-1.5 text-[11px] font-semibold text-blue-700 shadow-sm ring-1 ring-blue-200 transition hover:bg-white dark:bg-slate-900/70 dark:text-blue-300 dark:ring-blue-800"
+                    className="app-surface rounded-xl border px-2.5 py-1.5 text-[11px] font-semibold shadow-sm transition hover:opacity-90 [border-color:var(--app-border)]"
                   >
                     Got it
                   </button>
@@ -1475,7 +1644,7 @@ export default function App() {
 
         <div
           className={clsx(
-            'fixed inset-0 z-50 flex items-end justify-center bg-slate-950/10 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-300',
+            'app-overlay fixed inset-0 z-50 flex items-end justify-center px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-300',
             activePendingLog ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
           )}
           onClick={() => {
@@ -1486,20 +1655,20 @@ export default function App() {
         >
           <div
             className={clsx(
-              'w-full max-w-sm rounded-3xl border border-slate-100 bg-white p-4 shadow-2xl ring-1 ring-black/5 transition-transform duration-500 ease-spring dark:border-slate-700 dark:bg-slate-800',
+              'app-surface w-full max-w-sm rounded-3xl border p-4 shadow-2xl ring-1 ring-black/5 transition-transform duration-500 ease-spring',
               activePendingLog ? 'translate-y-0' : 'translate-y-[120%]',
             )}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Add a note?</p>
-                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{pendingActivityLabel} · auto-skip {Math.floor(NOTE_SHEET_AUTO_DISMISS_MS / 1000)}s</p>
+                <p className="app-text text-sm font-semibold">Add a note?</p>
+                <p className="app-muted mt-1 text-xs">{pendingActivityLabel} · auto-skip {Math.floor(NOTE_SHEET_AUTO_DISMISS_MS / 1000)}s</p>
               </div>
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => void handleUndoPendingLog()}
-                  className="rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                  className="app-icon-button rounded-xl p-2 transition"
                   aria-label="Undo event"
                   title="Undo event"
                 >
@@ -1507,7 +1676,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => void handleInputDismiss()}
-                  className="rounded-xl px-2.5 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                  className="app-page-button rounded-xl border px-2.5 py-2 text-sm font-semibold transition"
                 >
                   Skip
                 </button>
@@ -1520,7 +1689,7 @@ export default function App() {
                 value={inputValue}
                 onChange={(event) => setInputValue(event.target.value)}
                 placeholder={`Add note for ${pendingActivityLabel}...`}
-                className="min-w-0 flex-1 bg-slate-100 dark:bg-slate-900 border-0 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-slate-400"
+                className="app-input app-focus min-w-0 flex-1 rounded-xl border px-4 py-3 text-base outline-none"
                 autoFocus={Boolean(activePendingLog)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -1533,7 +1702,7 @@ export default function App() {
               />
               <button
                 onClick={() => void handleInputSubmit()}
-                className="shrink-0 rounded-xl bg-blue-600 p-3 text-white transition-all hover:bg-blue-700 active:scale-95"
+                className="app-primary-button shrink-0 rounded-xl p-3 transition-all active:scale-95"
                 aria-label="Save note"
               >
                 <Send size={20} strokeWidth={2.5} />

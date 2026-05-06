@@ -40,6 +40,8 @@ security = HTTPBearer(auto_error=False)
 TRACKER_BUTTONS_PER_PAGE = 8
 MAX_TRACKER_BUTTON_PAGES = 3
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
+DEFAULT_COLOR_PALETTE = "default"
+COLOR_PALETTE_KEYS = ("default", "blossom", "meadow", "twilight")
 
 TRACKER_SYMBOLS: list[dict[str, object]] = [
     {"key": "bottle-wine", "label": "Bottle", "emoji": "🍼", "keywords": ["milk", "feed", "drink"]},
@@ -161,6 +163,7 @@ class Account(SQLModel, table=True):
     password_hash: str
     password_salt: str
     baby_name: Optional[str] = None
+    color_palette: str = DEFAULT_COLOR_PALETTE
     google_calendar_id: Optional[str] = None
     google_calendar_summary: Optional[str] = None
     service_managed_calendar: bool = False
@@ -227,6 +230,7 @@ class LoginRequest(SQLModel):
 
 class AccountSettingsUpdate(SQLModel):
     baby_name: Optional[str] = None
+    color_palette: Optional[str] = None
     share_emails: Optional[list[str]] = None
 
 
@@ -234,6 +238,7 @@ class AccountResponse(SQLModel):
     id: int
     username: str
     baby_name: Optional[str]
+    color_palette: str
     share_emails: list[str]
     google_calendar_id: Optional[str]
     google_calendar_summary: Optional[str]
@@ -377,6 +382,7 @@ def _ensure_event_columns() -> None:
 
 
 def _ensure_account_columns() -> None:
+    _ensure_column("account", "color_palette", f"ALTER TABLE account ADD COLUMN color_palette VARCHAR DEFAULT '{DEFAULT_COLOR_PALETTE}'")
     _ensure_column("account", "google_sync_token", "ALTER TABLE account ADD COLUMN google_sync_token VARCHAR")
     _ensure_column("account", "google_last_synced_at", "ALTER TABLE account ADD COLUMN google_last_synced_at DATETIME")
     _ensure_column("account", "google_last_sync_status", "ALTER TABLE account ADD COLUMN google_last_sync_status VARCHAR")
@@ -402,6 +408,16 @@ def _normalize_share_emails(emails: list[str]) -> list[str]:
         seen.add(email)
         normalized.append(email)
     return normalized
+
+
+def _normalize_color_palette(value: Optional[str]) -> str:
+    palette = (value or DEFAULT_COLOR_PALETTE).strip().lower()
+    if palette not in COLOR_PALETTE_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown color palette '{value}'",
+        )
+    return palette
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -632,6 +648,7 @@ def _account_response(session: Session, account: Account) -> AccountResponse:
         id=account.id,
         username=account.username,
         baby_name=account.baby_name,
+        color_palette=_normalize_color_palette(account.color_palette),
         share_emails=share_emails,
         google_calendar_id=account.google_calendar_id,
         google_calendar_summary=account.google_calendar_summary,
@@ -1050,6 +1067,7 @@ def register(payload: RegisterRequest):
             password_hash=password_hash,
             password_salt=password_salt,
             baby_name=payload.baby_name.strip() if payload.baby_name else None,
+            color_palette=DEFAULT_COLOR_PALETTE,
         )
         session.add(account)
         session.commit()
@@ -1107,6 +1125,8 @@ def update_account_settings(payload: AccountSettingsUpdate, session_context: Ses
 
         if payload.baby_name is not None:
             account.baby_name = payload.baby_name.strip() or None
+        if payload.color_palette is not None:
+            account.color_palette = _normalize_color_palette(payload.color_palette)
         account.updated_at = datetime.now(timezone.utc)
         session.add(account)
         session.commit()
@@ -1142,7 +1162,15 @@ def get_tracker_buttons(session_context: SessionContext = Depends(require_sessio
 def update_tracker_buttons(payload: TrackerButtonsUpdate, session_context: SessionContext = Depends(require_session)):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
-        _store_tracker_buttons(session, account, payload.buttons)
+        try:
+            _store_tracker_buttons(session, account, payload.buttons)
+        except HTTPException as exc:
+            logger.warning(
+                "Rejected tracker buttons update for account %s: %s",
+                account.id,
+                exc.detail,
+            )
+            raise
         return _tracker_buttons_response(session, account)
 
 

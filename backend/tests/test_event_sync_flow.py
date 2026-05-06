@@ -152,6 +152,7 @@ def test_register_returns_session_and_profile(client: TestClient):
     assert data["token"]
     assert data["account"]["username"] == "parent1"
     assert data["account"]["baby_name"] == "Ava"
+    assert data["account"]["color_palette"] == "default"
 
     me = client.get("/auth/me", headers=auth_headers(data["token"]))
     assert me.status_code == 200
@@ -441,6 +442,23 @@ def test_enable_sync_provisions_calendar_and_shares_to_saved_emails(client: Test
     fake_service = main.get_calendar_service()
     assert len(fake_service.created_calendars) == 1
     assert {row["email"] for row in fake_service.shared_calendars} == {"mom@example.com", "dad@example.com"}
+
+
+def test_account_settings_persist_color_palette(client: TestClient):
+    data = register(client, "palette-user", "secret123")
+    token = data["token"]
+
+    updated = client.patch(
+        "/account/settings",
+        headers=auth_headers(token),
+        json={"color_palette": "meadow"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["color_palette"] == "meadow"
+
+    me = client.get("/auth/me", headers=auth_headers(token))
+    assert me.status_code == 200
+    assert me.json()["color_palette"] == "meadow"
 
 
 def test_finalize_routes_event_to_account_calendar(client: TestClient):

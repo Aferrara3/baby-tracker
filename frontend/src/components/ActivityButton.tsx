@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, type CSSProperties } from 'react';
 import { clsx } from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
@@ -96,8 +96,9 @@ export default function ActivityButton({
           'shadow-lg hover:shadow-xl active:scale-95',
           activity.colorClass,
           isPressed ? 'scale-90 brightness-90' : 'hover:-translate-y-1',
-          isRunning && 'ring-4 ring-offset-2 ring-blue-400 dark:ring-blue-500 animate-pulse'
+          isRunning && 'ring-4 ring-offset-2 animate-pulse'
         )}
+        style={isRunning ? ({ '--tw-ring-color': 'var(--app-ring)' } as CSSProperties) : undefined}
       >
         <Icon 
           size={32} 
@@ -110,11 +111,11 @@ export default function ActivityButton({
       </button>
 
       <div className="flex flex-col items-center">
-        <span className="text-[11px] md:text-sm font-bold text-slate-700 dark:text-slate-200 tracking-wide uppercase">
+        <span className="app-text text-[11px] md:text-sm font-bold tracking-wide uppercase">
           {activity.label}
         </span>
         {isRunning && (
-          <span className="text-xs font-mono font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded-full mt-1">
+          <span className="app-timer-pill mt-1 rounded-full px-2 py-0.5 text-xs font-mono font-medium">
             {formatTime(timerDuration)}
           </span>
         )}

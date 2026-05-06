@@ -176,14 +176,14 @@ const ICONS_BY_KEY: Record<string, LucideIcon> = {
 };
 
 const COLOR_CLASS_BY_KEY: Record<string, string> = {
-  blue: 'bg-gradient-to-br from-blue-400 to-blue-600 dark:from-blue-500 dark:to-blue-700 shadow-blue-200 dark:shadow-blue-900/30',
-  amber: 'bg-gradient-to-br from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700 shadow-amber-200 dark:shadow-amber-900/30',
-  cyan: 'bg-gradient-to-br from-cyan-400 to-cyan-600 dark:from-cyan-500 dark:to-cyan-700 shadow-cyan-200 dark:shadow-cyan-900/30',
-  pink: 'bg-gradient-to-br from-pink-400 to-pink-600 dark:from-pink-500 dark:to-pink-700 shadow-pink-200 dark:shadow-pink-900/30',
-  indigo: 'bg-gradient-to-br from-indigo-400 to-indigo-600 dark:from-indigo-500 dark:to-indigo-700 shadow-indigo-200 dark:shadow-indigo-900/30',
-  rose: 'bg-gradient-to-br from-rose-400 to-rose-600 dark:from-rose-500 dark:to-rose-700 shadow-rose-200 dark:shadow-rose-900/30',
-  orange: 'bg-gradient-to-br from-orange-400 to-orange-600 dark:from-orange-500 dark:to-orange-700 shadow-orange-200 dark:shadow-orange-900/30',
-  slate: 'bg-gradient-to-br from-slate-400 to-slate-600 dark:from-slate-500 dark:to-slate-700 shadow-slate-200 dark:shadow-slate-900/30',
+  blue: 'tracker-color-blue',
+  amber: 'tracker-color-amber',
+  cyan: 'tracker-color-cyan',
+  pink: 'tracker-color-pink',
+  indigo: 'tracker-color-indigo',
+  rose: 'tracker-color-rose',
+  orange: 'tracker-color-orange',
+  slate: 'tracker-color-slate',
 };
 
 export const DEFAULT_TRACKER_SYMBOLS: TrackerSymbolOption[] = [
@@ -317,26 +317,47 @@ export function normalizeTrackerButtons(buttons: TrackerButtonConfig[], symbols:
   return sortTrackerButtons(buttons).map((button, index) => deriveTrackerButton({ ...button, position: index }, symbols));
 }
 
-export function createTrackerButtonsForPage(pageIndex: number, symbols: TrackerSymbolOption[]): TrackerButtonConfig[] {
+function createUniqueTrackerButtonId(baseId: string, existingIds: Set<string>): string {
+  let candidateId = baseId;
+  let suffix = 2;
+
+  while (existingIds.has(candidateId)) {
+    candidateId = `${baseId}_${suffix}`;
+    suffix += 1;
+  }
+
+  existingIds.add(candidateId);
+  return candidateId;
+}
+
+export function createTrackerButtonsForPage(
+  pageIndex: number,
+  symbols: TrackerSymbolOption[],
+  existingButtons: Pick<TrackerButtonConfig, 'id'>[] = [],
+): TrackerButtonConfig[] {
   const pageStart = pageIndex * TRACKER_BUTTONS_PER_PAGE;
-  if (pageIndex === 0) {
-    return DEFAULT_TRACKER_BUTTONS.map((button, index) => deriveTrackerButton({ ...button, position: pageStart + index }, symbols));
-  }
+  const existingIds = new Set(existingButtons.map((button) => button.id));
+  const baseButtons =
+    pageIndex === 0
+      ? DEFAULT_TRACKER_BUTTONS
+      : pageIndex === 1
+        ? SECOND_PAGE_DEFAULT_TRACKER_BUTTONS
+        : Array.from({ length: TRACKER_BUTTONS_PER_PAGE }, (_, slotIndex) => ({
+            id: `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`,
+            label: `Other ${slotIndex + 1}`,
+            icon_key: 'help-circle',
+            color_key: 'slate',
+            position: pageStart + slotIndex,
+            emoji: '❓',
+            title: `❓ Other ${slotIndex + 1}`,
+          }));
 
-  if (pageIndex === 1) {
-    return SECOND_PAGE_DEFAULT_TRACKER_BUTTONS.map((button, index) =>
-      deriveTrackerButton({ ...button, position: pageStart + index }, symbols),
-    );
-  }
-
-  return Array.from({ length: TRACKER_BUTTONS_PER_PAGE }, (_, slotIndex) =>
+  return baseButtons.map((button, index) =>
     deriveTrackerButton(
       {
-        id: `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`,
-        label: `Other ${slotIndex + 1}`,
-        icon_key: 'help-circle',
-        color_key: 'slate',
-        position: pageStart + slotIndex,
+        ...button,
+        id: createUniqueTrackerButtonId(button.id, existingIds),
+        position: pageStart + index,
       },
       symbols,
     ),
