@@ -19,6 +19,8 @@ Baby activity tracker with a FastAPI backend, React frontend, SQLite storage, an
 
 ## Local development
 
+Copy `.env.example` to `.env` at the repo root to override local backend settings.
+
 ### Backend
 
 ```bash
@@ -87,3 +89,4 @@ npm run build
 - Users can save share emails and enable sync from the Settings screen.
 - Google pull sync runs automatically on a configurable interval in the frontend.
 - The default poll interval is one hour via `VITE_GOOGLE_SYNC_POLL_INTERVAL_MS`.
+- For functional testing of the queued retry UX without touching Google, set `FORCE_GCAL_QUEUE_RETRY_TEST=1` in the repo root `.env` file and restart the backend. That keeps the real app flow unchanged: save locally, queue automatic retries, and show the delayed-sync UX.

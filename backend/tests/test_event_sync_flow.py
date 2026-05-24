@@ -21,8 +21,13 @@ class FakeCalendarService:
         self.shared_calendars: list[dict] = []
         self.updated_calendars: list[dict] = []
         self.sync_responses: list[dict] = []
+        self.create_failures: list[Exception] = []
+        self.update_failures: list[Exception] = []
+        self.delete_failures: list[Exception] = []
 
     def create_event_from_baby_event(self, event, calendar_id=None) -> dict:
+        if self.create_failures:
+            raise self.create_failures.pop(0)
         payload = {
             "id": f"event-{len(self.created_events) + 1}",
             "calendar_id": calendar_id,
@@ -42,6 +47,8 @@ class FakeCalendarService:
         return payload
 
     def update_event_from_baby_event(self, calendar_event_id, event, calendar_id=None) -> dict:
+        if self.update_failures:
+            raise self.update_failures.pop(0)
         payload = {
             "id": calendar_event_id,
             "calendar_id": calendar_id,
@@ -86,6 +93,8 @@ class FakeCalendarService:
         return payload
 
     def delete_event(self, calendar_event_id, calendar_id=None) -> None:
+        if self.delete_failures:
+            raise self.delete_failures.pop(0)
         self.deleted_events.append(
             {
                 "id": calendar_event_id,
@@ -115,9 +124,12 @@ def client(tmp_path):
 
     old_engine = main.engine
     old_service = main._calendar_service
+    old_worker_enabled = main._calendar_sync_worker_enabled
 
     main.engine = test_engine
     main._calendar_service = FakeCalendarService()
+    main._calendar_sync_worker_enabled = False
+    main._stop_calendar_sync_worker()
 
     SQLModel.metadata.create_all(main.engine)
     main._ensure_account_columns()
@@ -128,6 +140,8 @@ def client(tmp_path):
 
     main.engine = old_engine
     main._calendar_service = old_service
+    main._calendar_sync_worker_enabled = old_worker_enabled
+    main._stop_calendar_sync_worker()
 
 
 def auth_headers(token: str) -> dict[str, str]:
@@ -144,6 +158,22 @@ def register(client: TestClient, username: str, password: str, baby_name: str | 
     response = client.post("/auth/register", json=payload)
     assert response.status_code == 200
     return response.json()
+
+
+def drain_calendar_jobs() -> None:
+    for _ in range(20):
+        if main._process_calendar_sync_jobs(limit=50) == 0:
+            return
+    raise AssertionError("calendar sync queue did not drain in time")
+
+
+def make_all_calendar_jobs_due() -> None:
+    with Session(main.engine) as session:
+        jobs = session.exec(select(main.CalendarSyncJob)).all()
+        for job in jobs:
+            job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            session.add(job)
+        session.commit()
 
 
 def test_register_returns_session_and_profile(client: TestClient):
@@ -403,10 +433,10 @@ def test_stop_syncs_started_timer_and_finalize_updates_same_calendar_event(clien
     stopped = client.post("/activities/stop", headers=headers, json={"type": "sleep"})
     assert stopped.status_code == 200
     assert stopped.json()["status"] == "success"
+    assert stopped.json()["calendar_sync_state"] == "queued"
 
     fake_service = main.get_calendar_service()
-    assert len(fake_service.created_events) == 1
-    assert fake_service.created_events[0]["type"] == "sleep"
+    assert fake_service.created_events == []
 
     finalized = client.post(
         f"/events/{stopped.json()['event_id']}/finalize",
@@ -414,10 +444,14 @@ def test_stop_syncs_started_timer_and_finalize_updates_same_calendar_event(clien
         json={"details": "solid nap"},
     )
     assert finalized.status_code == 200
+    assert finalized.json()["calendar_sync_state"] == "queued"
+
+    drain_calendar_jobs()
 
     assert len(fake_service.created_events) == 1
-    assert len(fake_service.updated_events) == 1
-    assert fake_service.updated_events[0]["details"] == "solid nap"
+    assert fake_service.created_events[0]["type"] == "sleep"
+    assert fake_service.created_events[0]["details"] == "solid nap"
+    assert fake_service.updated_events == []
 
 
 def test_enable_sync_provisions_calendar_and_shares_to_saved_emails(client: TestClient):
@@ -480,8 +514,11 @@ def test_finalize_routes_event_to_account_calendar(client: TestClient):
         json={"details": "4 oz formula"},
     )
     assert finalized.status_code == 200
+    assert finalized.json()["calendar_sync_state"] == "queued"
 
     fake_service = main.get_calendar_service()
+    assert fake_service.created_events == []
+    drain_calendar_jobs()
     assert len(fake_service.created_events) == 1
     assert fake_service.created_events[0]["calendar_id"] == "calendar-1"
     assert fake_service.created_events[0]["details"] == "4 oz formula"
@@ -540,6 +577,7 @@ def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClie
     assert finalized.json()["title"] == "🏋️ Workout"
 
     fake_service = main.get_calendar_service()
+    drain_calendar_jobs()
     assert fake_service.created_events[-1]["summary"] == "🏋️ Workout"
 
 
@@ -588,6 +626,7 @@ def test_existing_synced_event_updates_same_calendar_event(client: TestClient):
         headers=auth_headers(token),
         json={"details": "puree"},
     )
+    drain_calendar_jobs()
 
     updated = client.patch(
         f"/events/{created.json()['id']}",
@@ -595,6 +634,9 @@ def test_existing_synced_event_updates_same_calendar_event(client: TestClient):
         json={"details": "puree + yogurt"},
     )
     assert updated.status_code == 200
+    assert updated.json()["calendar_sync_state"] == "queued"
+
+    drain_calendar_jobs()
 
     fake_service = main.get_calendar_service()
     assert len(fake_service.created_events) == 1
@@ -620,6 +662,7 @@ def test_delete_single_event_removes_synced_google_event(client: TestClient):
         json={"details": "temporary"},
     )
     assert finalized.status_code == 200
+    drain_calendar_jobs()
 
     deleted = client.delete(f"/events/{created.json()['id']}", headers=headers)
     assert deleted.status_code == 200
@@ -630,6 +673,8 @@ def test_delete_single_event_removes_synced_google_event(client: TestClient):
     assert remaining.json() == []
 
     fake_service = main.get_calendar_service()
+    assert fake_service.deleted_events == []
+    drain_calendar_jobs()
     assert len(fake_service.deleted_events) == 1
     assert fake_service.deleted_events[0]["calendar_id"] == "calendar-1"
 
@@ -655,6 +700,7 @@ def test_delete_events_for_day_is_user_scoped_and_removes_calendar_events(client
         headers=first_headers,
         json={"details": "delete me"},
     )
+    drain_calendar_jobs()
 
     client.post(
         "/events",
@@ -678,6 +724,8 @@ def test_delete_events_for_day_is_user_scoped_and_removes_calendar_events(client
     assert len(second_events.json()) == 1
 
     fake_service = main.get_calendar_service()
+    assert fake_service.deleted_events == []
+    drain_calendar_jobs()
     assert len(fake_service.deleted_events) == 1
     assert fake_service.deleted_events[0]["calendar_id"] == "calendar-1"
 
@@ -698,6 +746,7 @@ def test_simulate_day_replaces_selected_day_and_syncs_sample_events(client: Test
         headers=headers,
         json={"details": "old event"},
     )
+    drain_calendar_jobs()
 
     simulated = client.post(
         f"/events/simulate-day?target_date={target_date}&time_zone=America/Los_Angeles",
@@ -708,9 +757,11 @@ def test_simulate_day_replaces_selected_day_and_syncs_sample_events(client: Test
     assert payload["target_date"] == target_date
     assert payload["deleted_count"] == 1
     assert payload["created_count"] == 12
-    assert payload["synced_to_calendar"] is True
+    assert payload["synced_to_calendar"] is False
+    assert payload["calendar_sync_state"] == "queued"
 
     fake_service = main.get_calendar_service()
+    drain_calendar_jobs()
     assert len(fake_service.deleted_events) == 1
     assert len(fake_service.created_events) == 13
 
@@ -751,6 +802,7 @@ def test_simulate_day_uses_current_tracker_buttons(client: TestClient):
     assert simulated.json()["created_count"] == 12
 
     fake_service = main.get_calendar_service()
+    drain_calendar_jobs()
     created_titles = {event["summary"] for event in fake_service.created_events}
     assert "🏋️ Workout" in created_titles
 
@@ -803,6 +855,7 @@ def test_google_sync_imports_remote_updates_and_new_events(client: TestClient):
         headers=headers,
         json={"details": "original note"},
     )
+    drain_calendar_jobs()
 
     fake_service = main.get_calendar_service()
     fake_service.sync_responses.append(
@@ -870,6 +923,7 @@ def test_google_sync_deletes_cancelled_remote_events(client: TestClient):
         json={"type": "sleep", "start_time": "2026-04-02T10:00:00+00:00", "end_time": "2026-04-02T11:00:00+00:00", "duration": 3600},
     )
     client.post(f"/events/{created.json()['id']}/finalize", headers=headers, json={})
+    drain_calendar_jobs()
 
     fake_service = main.get_calendar_service()
     fake_service.sync_responses.append(
@@ -904,6 +958,7 @@ def test_google_sync_reassigns_type_when_title_matches_known_activity(client: Te
         json={"type": "help", "start_time": "2026-04-02T12:00:00+00:00"},
     )
     client.post(f"/events/{created.json()['id']}/finalize", headers=headers, json={})
+    drain_calendar_jobs()
 
     fake_service = main.get_calendar_service()
     fake_service.sync_responses.append(
@@ -932,6 +987,78 @@ def test_google_sync_reassigns_type_when_title_matches_known_activity(client: Te
     assert event["type"] == "sleep"
     assert event["title"] == "😴 Sleep"
     assert event["details"] == "retitled in google"
+
+
+def test_transient_google_create_failure_keeps_event_saved_and_retries(client: TestClient):
+    data = register(client, "retry-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    fake_service = main.get_calendar_service()
+    fake_service.create_failures.append(OSError("tls reset"))
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "food", "start_time": "2026-04-02T12:00:00+00:00"},
+    )
+    finalized = client.post(
+        f"/events/{created.json()['id']}/finalize",
+        headers=headers,
+        json={"details": "queued first"},
+    )
+    assert finalized.status_code == 200
+    assert finalized.json()["calendar_sync_state"] == "queued"
+
+    drain_calendar_jobs()
+
+    queued_event = client.get("/events", headers=headers).json()[0]
+    assert queued_event["calendar_sync_state"] == "queued"
+    assert queued_event["calendar_sync_message"] == "GCal update failed. Will auto-retry in background."
+    assert fake_service.created_events == []
+
+    make_all_calendar_jobs_due()
+    drain_calendar_jobs()
+
+    synced_event = client.get("/events", headers=headers).json()[0]
+    assert synced_event["calendar_sync_state"] == "synced"
+    assert len(fake_service.created_events) == 1
+    assert fake_service.created_events[0]["details"] == "queued first"
+
+
+def test_transient_google_delete_failure_keeps_event_hidden_until_retry_succeeds(client: TestClient):
+    data = register(client, "retry-delete-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    created = client.post(
+        "/events",
+        headers=headers,
+        json={"type": "sleep", "start_time": "2026-04-02T10:00:00+00:00"},
+    )
+    client.post(f"/events/{created.json()['id']}/finalize", headers=headers, json={})
+    drain_calendar_jobs()
+
+    fake_service = main.get_calendar_service()
+    fake_service.delete_failures.append(OSError("tls reset"))
+
+    deleted = client.delete(f"/events/{created.json()['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert client.get("/events", headers=headers).json() == []
+
+    drain_calendar_jobs()
+
+    with Session(main.engine) as session:
+        stored_event = session.get(main.Event, created.json()["id"])
+        assert stored_event is not None
+        assert stored_event.deleted_at is not None
+
+    make_all_calendar_jobs_due()
+    drain_calendar_jobs()
+
+    with Session(main.engine) as session:
+        assert session.get(main.Event, created.json()["id"]) is None
+    assert len(fake_service.deleted_events) == 1
 
 
 def test_unauthenticated_requests_are_rejected(client: TestClient):

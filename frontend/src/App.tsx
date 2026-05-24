@@ -100,6 +100,8 @@ interface EventSummary {
   duration: number | null;
   details: string | null;
   is_active: boolean;
+  calendar_sync_state: 'local_only' | 'pending' | 'queued' | 'synced' | 'failed';
+  calendar_sync_message: string | null;
 }
 
 interface PendingLogItem {
@@ -208,12 +210,14 @@ export default function App() {
   const [paletteSaveError, setPaletteSaveError] = useState<string | null>(null);
   const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
+  const pendingLogActionRef = useRef<number | null>(null);
   const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
   const paletteAutosaveTimeoutRef = useRef<number | null>(null);
   const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
   const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
   const buttonsSaveRequestIdRef = useRef(0);
   const paletteSaveRequestIdRef = useRef(0);
+  const toastIdRef = useRef(0);
   const dragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -276,7 +280,8 @@ export default function App() {
   const buttonsHaveUnsavedChanges = serializedSettingsButtonsDraft !== savedButtonsPayloadRef.current;
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    const id = Date.now().toString();
+    toastIdRef.current += 1;
+    const id = `toast-${toastIdRef.current}`;
     setToasts((prev) => [...prev, { id, message, type }]);
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
@@ -431,20 +436,31 @@ export default function App() {
 
   const finalizePendingEvent = useCallback(async (details?: string) => {
     if (!activePendingLog || !authHeaders) {
-      return;
+      return null;
     }
 
-    await axios.post(
+    const response = await axios.post<EventSummary>(
       `${API_BASE}/events/${activePendingLog.eventId}/finalize`,
       details !== undefined ? { details } : {},
       { headers: authHeaders },
     );
+    return response.data;
   }, [activePendingLog, authHeaders]);
 
   const resetPendingInput = useCallback(() => {
     setPendingLogs((prev) => prev.slice(1));
     setInputValue('');
   }, []);
+
+  const showCalendarSyncToast = useCallback((event: EventSummary | null) => {
+    if (!event?.calendar_sync_message) {
+      return;
+    }
+
+    if (event.calendar_sync_state === 'local_only' || event.calendar_sync_state === 'queued' || event.calendar_sync_state === 'failed') {
+      addToast(event.calendar_sync_message, 'info');
+    }
+  }, [addToast]);
 
   const handleAuthSubmit = async () => {
     if (!username.trim() || !password.trim()) {
@@ -502,6 +518,31 @@ export default function App() {
       setSettingsShareEmails(response.data.share_emails.join(', '));
     }
   }, [authHeaders]);
+
+  const completePendingLog = useCallback(async (details?: string) => {
+    if (!activePendingLog) {
+      return;
+    }
+
+    if (pendingLogActionRef.current === activePendingLog.eventId) {
+      return;
+    }
+
+    pendingLogActionRef.current = activePendingLog.eventId;
+    try {
+      const finalizedEvent = await finalizePendingEvent(details);
+      if (details) {
+        addToast('Note saved', 'success');
+      }
+      showCalendarSyncToast(finalizedEvent);
+      resetPendingInput();
+      await refreshAccount();
+    } finally {
+      if (pendingLogActionRef.current === activePendingLog.eventId) {
+        pendingLogActionRef.current = null;
+      }
+    }
+  }, [activePendingLog, addToast, finalizePendingEvent, refreshAccount, resetPendingInput, showCalendarSyncToast]);
 
   const updateDraftButton = useCallback((buttonId: string, changes: Partial<TrackerButtonUpdate>) => {
     setSettingsButtonsDraft((currentButtons) =>
@@ -710,6 +751,11 @@ export default function App() {
       return;
     }
 
+    if (pendingLogActionRef.current === activePendingLog.eventId) {
+      return;
+    }
+
+    pendingLogActionRef.current = activePendingLog.eventId;
     try {
       await axios.delete(`${API_BASE}/events/${activePendingLog.eventId}`, {
         headers: authHeaders,
@@ -720,6 +766,10 @@ export default function App() {
     } catch (error) {
       addToast('Failed to undo event', 'error');
       console.error('Undo event error:', error);
+    } finally {
+      if (pendingLogActionRef.current === activePendingLog.eventId) {
+        pendingLogActionRef.current = null;
+      }
     }
   }, [activePendingLog, addToast, authHeaders, refreshAccount, resetPendingInput]);
 
@@ -1038,35 +1088,33 @@ export default function App() {
   };
 
   const handleInputSubmit = useCallback(async () => {
+    const trimmedInput = inputValue.trim();
+    if (!trimmedInput) {
+      try {
+        await completePendingLog();
+      } catch (error) {
+        addToast('Failed to save event', 'error');
+        console.error('Finalize event error:', error);
+      }
+      return;
+    }
+
     try {
-      await finalizePendingEvent(inputValue.trim() || undefined);
-      if (inputValue.trim()) {
-        addToast('Note saved', 'success');
-      }
-      if (account && !account.calendar_connected) {
-        addToast('Saved locally. Enable calendar sync in Settings when ready.', 'info');
-      }
-      resetPendingInput();
-      await refreshAccount();
+      await completePendingLog(trimmedInput);
     } catch (error) {
-      addToast('Failed to sync event', 'error');
+      addToast('Failed to save event', 'error');
       console.error('Finalize event error:', error);
     }
-  }, [account, addToast, finalizePendingEvent, inputValue, refreshAccount, resetPendingInput]);
+  }, [addToast, completePendingLog, inputValue]);
 
   const handleInputDismiss = useCallback(async () => {
     try {
-      await finalizePendingEvent();
-      if (account && !account.calendar_connected) {
-        addToast('Saved locally. Enable calendar sync in Settings when ready.', 'info');
-      }
-      resetPendingInput();
-      await refreshAccount();
+      await completePendingLog();
     } catch (error) {
-      addToast('Failed to sync event', 'error');
+      addToast('Failed to save event', 'error');
       console.error('Finalize event error:', error);
     }
-  }, [account, addToast, finalizePendingEvent, refreshAccount, resetPendingInput]);
+  }, [addToast, completePendingLog]);
 
   useEffect(() => {
     if (!authHeaders || !account?.calendar_connected) {

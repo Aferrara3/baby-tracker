@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import random
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
@@ -14,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from googleapiclient.errors import HttpError
 from sqlalchemy import text
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
@@ -30,6 +33,7 @@ from config import (
     CORS_ALLOWED_ORIGINS,
     CREDENTIALS_PATH,
     DATABASE_URL,
+    FORCE_GCAL_QUEUE_RETRY_TEST,
     FRONTEND_DIST_PATH,
     SESSION_TTL_DAYS,
 )
@@ -42,6 +46,11 @@ MAX_TRACKER_BUTTON_PAGES = 3
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
 DEFAULT_COLOR_PALETTE = "default"
 COLOR_PALETTE_KEYS = ("default", "blossom", "meadow", "twilight")
+CALENDAR_SYNC_ACTIVE_JOB_STATUSES = ("pending", "retrying", "processing")
+CALENDAR_SYNC_QUEUE_POLL_INTERVAL_SECONDS = 30
+CALENDAR_SYNC_BASE_RETRY_SECONDS = 30
+CALENDAR_SYNC_MAX_RETRY_SECONDS = 60 * 60
+CALENDAR_SYNC_MAX_BATCH_SIZE = 10
 
 TRACKER_SYMBOLS: list[dict[str, object]] = [
     {"key": "bottle-wine", "label": "Bottle", "emoji": "🍼", "keywords": ["milk", "feed", "drink"]},
@@ -214,6 +223,27 @@ class Event(SQLModel, table=True):
     calendar_synced_at: Optional[datetime] = None
     google_etag: Optional[str] = None
     google_updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    calendar_sync_status: Optional[str] = None
+    calendar_sync_error: Optional[str] = None
+    calendar_sync_queued_at: Optional[datetime] = None
+
+
+class CalendarSyncJob(SQLModel, table=True):
+    __tablename__ = "calendar_sync_job"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(index=True, foreign_key="account.id")
+    event_id: Optional[int] = Field(default=None, index=True, foreign_key="event.id")
+    operation: str
+    status: str = "pending"
+    payload_json: Optional[str] = None
+    attempt_count: int = 0
+    last_error: Optional[str] = None
+    next_attempt_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
 
 
 class RegisterRequest(SQLModel):
@@ -271,6 +301,8 @@ class EventResponse(SQLModel):
     duration: Optional[int]
     details: Optional[str]
     is_active: bool
+    calendar_sync_state: str
+    calendar_sync_message: Optional[str] = None
 
 
 class DayActionResponse(SQLModel):
@@ -278,6 +310,7 @@ class DayActionResponse(SQLModel):
     deleted_count: int
     created_count: int = 0
     synced_to_calendar: bool = False
+    calendar_sync_state: Optional[str] = None
 
 
 class CalendarSyncResponse(SQLModel):
@@ -339,10 +372,20 @@ class SessionContext(SQLModel):
     token_hash: str
 
 
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    _start_calendar_sync_worker()
+    try:
+        yield
+    finally:
+        _stop_calendar_sync_worker()
+
+
 app = FastAPI(
     title="Baby Tracker API",
     description="API for tracking baby activities",
     version="1.0.0",
+    lifespan=_app_lifespan,
 )
 
 app.add_middleware(
@@ -354,6 +397,10 @@ app.add_middleware(
 )
 
 _calendar_service: Optional[CalendarService] = None
+_calendar_sync_worker_enabled = os.environ.get("DISABLE_CALENDAR_SYNC_WORKER") != "1"
+_calendar_sync_stop_event = threading.Event()
+_calendar_sync_wakeup = threading.Event()
+_calendar_sync_worker_thread: Optional[threading.Thread] = None
 
 
 def get_calendar_service() -> CalendarService:
@@ -379,6 +426,10 @@ def _ensure_event_columns() -> None:
     _ensure_column("event", "calendar_synced_at", "ALTER TABLE event ADD COLUMN calendar_synced_at DATETIME")
     _ensure_column("event", "google_etag", "ALTER TABLE event ADD COLUMN google_etag VARCHAR")
     _ensure_column("event", "google_updated_at", "ALTER TABLE event ADD COLUMN google_updated_at DATETIME")
+    _ensure_column("event", "deleted_at", "ALTER TABLE event ADD COLUMN deleted_at DATETIME")
+    _ensure_column("event", "calendar_sync_status", "ALTER TABLE event ADD COLUMN calendar_sync_status VARCHAR")
+    _ensure_column("event", "calendar_sync_error", "ALTER TABLE event ADD COLUMN calendar_sync_error VARCHAR")
+    _ensure_column("event", "calendar_sync_queued_at", "ALTER TABLE event ADD COLUMN calendar_sync_queued_at DATETIME")
 
 
 def _ensure_account_columns() -> None:
@@ -660,7 +711,32 @@ def _account_response(session: Session, account: Account) -> AccountResponse:
     )
 
 
-def _event_response(event: Event) -> EventResponse:
+def _event_sync_state(account: Account, event: Event) -> str:
+    if event.calendar_sync_status:
+        return event.calendar_sync_status
+    if not account.google_calendar_id:
+        return "local_only"
+    if event.is_active:
+        return "pending"
+    if event.calendar_event_id:
+        return "synced"
+    return "pending"
+
+
+def _event_sync_message(sync_state: str, event: Event) -> Optional[str]:
+    if sync_state == "local_only":
+        return "Saved locally. Enable calendar sync in Settings when ready."
+    if sync_state == "queued":
+        if event.calendar_sync_error:
+            return "GCal update failed. Will auto-retry in background."
+        return None
+    if sync_state == "failed":
+        return "Saved locally, but Google Calendar needs attention."
+    return None
+
+
+def _event_response(event: Event, account: Account) -> EventResponse:
+    sync_state = _event_sync_state(account, event)
     return EventResponse(
         id=event.id,
         type=event.type,
@@ -670,6 +746,8 @@ def _event_response(event: Event) -> EventResponse:
         duration=event.duration,
         details=event.details,
         is_active=event.is_active,
+        calendar_sync_state=sync_state,
+        calendar_sync_message=_event_sync_message(sync_state, event),
     )
 
 
@@ -678,6 +756,161 @@ def _load_account(session: Session, account_id: int) -> Account:
     if not account:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
     return account
+
+
+def _mark_event_local_only(event: Event) -> Event:
+    event.calendar_sync_status = "local_only"
+    event.calendar_sync_error = None
+    event.calendar_sync_queued_at = None
+    return event
+
+
+def _mark_event_sync_pending(event: Event) -> Event:
+    event.calendar_sync_status = "pending"
+    event.calendar_sync_error = None
+    event.calendar_sync_queued_at = None
+    return event
+
+
+def _mark_event_sync_queued(event: Event, error: Optional[str] = None) -> Event:
+    event.calendar_sync_status = "queued"
+    event.calendar_sync_error = error
+    event.calendar_sync_queued_at = datetime.now(timezone.utc)
+    return event
+
+
+def _mark_event_synced(event: Event) -> Event:
+    event.calendar_sync_status = "synced"
+    event.calendar_sync_error = None
+    event.calendar_sync_queued_at = None
+    return event
+
+
+def _mark_event_sync_failed(event: Event, error: str) -> Event:
+    event.calendar_sync_status = "failed"
+    event.calendar_sync_error = error
+    event.calendar_sync_queued_at = None
+    return event
+
+
+def _serialize_sync_job_payload(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True)
+
+
+def _deserialize_sync_job_payload(job: CalendarSyncJob) -> dict:
+    if not job.payload_json:
+        return {}
+    return json.loads(job.payload_json)
+
+
+def _calendar_sync_error_message(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def _maybe_raise_forced_calendar_sync_failure() -> None:
+    if not FORCE_GCAL_QUEUE_RETRY_TEST:
+        return
+    raise OSError("Forced Google Calendar retry test")
+
+
+def _is_retryable_calendar_error(exc: Exception) -> bool:
+    if isinstance(exc, HttpError):
+        status_code = getattr(exc.resp, "status", None)
+        return status_code in {408, 429} or (status_code is not None and status_code >= 500)
+    return isinstance(exc, (ConnectionError, OSError, TimeoutError))
+
+
+def _calendar_sync_retry_delay_seconds(attempt_count: int) -> int:
+    base_delay = min(CALENDAR_SYNC_MAX_RETRY_SECONDS, CALENDAR_SYNC_BASE_RETRY_SECONDS * (2 ** max(0, attempt_count - 1)))
+    jitter = random.randint(0, min(30, max(1, base_delay // 4)))
+    return min(CALENDAR_SYNC_MAX_RETRY_SECONDS, base_delay + jitter)
+
+
+def _pending_sync_jobs_by_event_id(session: Session, account_id: int) -> dict[int, CalendarSyncJob]:
+    jobs = session.exec(
+        select(CalendarSyncJob)
+        .where(
+            CalendarSyncJob.account_id == account_id,
+            CalendarSyncJob.event_id.is_not(None),
+            CalendarSyncJob.status.in_(CALENDAR_SYNC_ACTIVE_JOB_STATUSES),
+        )
+        .order_by(CalendarSyncJob.created_at.desc())
+    ).all()
+    return {job.event_id: job for job in jobs if job.event_id is not None}
+
+
+def _queue_calendar_upsert(session: Session, account: Account, event: Event) -> bool:
+    if not account.google_calendar_id:
+        _mark_event_local_only(event)
+        session.add(event)
+        return False
+
+    now = datetime.now(timezone.utc)
+    existing_job = session.exec(
+        select(CalendarSyncJob)
+        .where(CalendarSyncJob.event_id == event.id, CalendarSyncJob.operation == "upsert")
+        .order_by(CalendarSyncJob.id.desc())
+    ).first()
+    if existing_job is None:
+        existing_job = CalendarSyncJob(
+            account_id=account.id,
+            event_id=event.id,
+            operation="upsert",
+        )
+
+    existing_job.status = "pending"
+    existing_job.last_error = None
+    existing_job.next_attempt_at = now
+    existing_job.updated_at = now
+    existing_job.completed_at = None
+    session.add(existing_job)
+    queued_error = "Forced Google Calendar retry test" if FORCE_GCAL_QUEUE_RETRY_TEST else None
+    _mark_event_sync_queued(event, error=queued_error)
+    session.add(event)
+    return True
+
+
+def _queue_calendar_delete(session: Session, account: Account, event: Event) -> bool:
+    if not account.google_calendar_id or not event.calendar_event_id:
+        session.delete(event)
+        return False
+
+    for upsert_job in session.exec(
+        select(CalendarSyncJob).where(CalendarSyncJob.event_id == event.id, CalendarSyncJob.operation == "upsert")
+    ).all():
+        session.delete(upsert_job)
+
+    now = datetime.now(timezone.utc)
+    existing_job = session.exec(
+        select(CalendarSyncJob)
+        .where(CalendarSyncJob.event_id == event.id, CalendarSyncJob.operation == "delete")
+        .order_by(CalendarSyncJob.id.desc())
+    ).first()
+    if existing_job is None:
+        existing_job = CalendarSyncJob(
+            account_id=account.id,
+            event_id=event.id,
+            operation="delete",
+        )
+
+    existing_job.status = "pending"
+    existing_job.last_error = None
+    existing_job.next_attempt_at = now
+    existing_job.updated_at = now
+    existing_job.completed_at = None
+    existing_job.payload_json = _serialize_sync_job_payload({"calendar_event_id": event.calendar_event_id})
+    event.deleted_at = now
+    event.is_active = False
+    queued_error = "Forced Google Calendar retry test" if FORCE_GCAL_QUEUE_RETRY_TEST else None
+    _mark_event_sync_queued(event, error=queued_error)
+    session.add(existing_job)
+    session.add(event)
+    return True
+
+
+def _wake_calendar_sync_worker() -> None:
+    if _calendar_sync_worker_enabled:
+        _calendar_sync_wakeup.set()
 
 
 def _create_auth_session(session: Session, account_id: int) -> str:
@@ -736,20 +969,32 @@ def require_session(credentials: Optional[HTTPAuthorizationCredentials] = Securi
 
 def _sync_event_to_calendar(session: Session, account: Account, event: Event) -> Event:
     if not account.google_calendar_id:
+        _mark_event_local_only(event)
+        session.add(event)
+        session.commit()
+        session.refresh(event)
         return event
 
+    _maybe_raise_forced_calendar_sync_failure()
     service = get_calendar_service()
     if event.calendar_event_id:
-        result = service.update_event_from_baby_event(
-            event.calendar_event_id,
-            event,
-            calendar_id=account.google_calendar_id,
-        )
+        try:
+            result = service.update_event_from_baby_event(
+                event.calendar_event_id,
+                event,
+                calendar_id=account.google_calendar_id,
+            )
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) != 404:
+                raise
+            event.calendar_event_id = None
+            result = service.create_event_from_baby_event(event, calendar_id=account.google_calendar_id)
     else:
         result = service.create_event_from_baby_event(event, calendar_id=account.google_calendar_id)
 
     event.calendar_event_id = result["id"]
     _update_event_sync_metadata_from_google(event, result)
+    _mark_event_synced(event)
     session.add(event)
     session.commit()
     session.refresh(event)
@@ -763,6 +1008,7 @@ def _get_active_event(session: Session, account_id: int, activity_type: str) -> 
             Event.account_id == account_id,
             Event.type == activity_type,
             Event.is_active.is_(True),
+            Event.deleted_at.is_(None),
         )
         .order_by(Event.start_time.desc())
     ).first()
@@ -782,6 +1028,7 @@ def _sync_google_calendar_to_db(session: Session, account: Account) -> CalendarS
     imported_count = 0
     updated_count = 0
     deleted_count = 0
+    pending_jobs_by_event_id = _pending_sync_jobs_by_event_id(session, account.id)
 
     local_events = {
         event.calendar_event_id: event
@@ -804,8 +1051,24 @@ def _sync_google_calendar_to_db(session: Session, account: Account) -> CalendarS
         existing_event = local_events.get(google_event_id)
         if google_event.get("status") == "cancelled":
             if existing_event:
+                pending_job = pending_jobs_by_event_id.get(existing_event.id) if existing_event.id is not None else None
+                if pending_job and pending_job.operation == "upsert":
+                    continue
+                if pending_job and pending_job.operation == "delete":
+                    session.exec(
+                        select(CalendarSyncJob).where(CalendarSyncJob.id == pending_job.id)
+                    ).first()
+                    session.delete(pending_job)
                 session.delete(existing_event)
                 deleted_count += 1
+            continue
+
+        pending_job = pending_jobs_by_event_id.get(existing_event.id) if existing_event and existing_event.id is not None else None
+        if existing_event and existing_event.deleted_at is not None:
+            continue
+        if pending_job and pending_job.operation == "upsert":
+            continue
+        if pending_job and pending_job.operation == "delete":
             continue
 
         event = _apply_google_event_to_local(existing_event, google_event, account.id)
@@ -822,6 +1085,11 @@ def _sync_google_calendar_to_db(session: Session, account: Account) -> CalendarS
             if google_event.get("id") and google_event.get("status") != "cancelled"
         }
         for google_event_id, existing_event in local_events.items():
+            pending_job = pending_jobs_by_event_id.get(existing_event.id) if existing_event.id is not None else None
+            if pending_job:
+                continue
+            if existing_event.deleted_at is not None:
+                continue
             if google_event_id not in remote_active_ids:
                 session.delete(existing_event)
                 deleted_count += 1
@@ -842,6 +1110,163 @@ def _sync_google_calendar_to_db(session: Session, account: Account) -> CalendarS
     )
 
 
+def _delete_calendar_event_from_google(account: Account, calendar_event_id: str) -> None:
+    _maybe_raise_forced_calendar_sync_failure()
+    try:
+        get_calendar_service().delete_event(calendar_event_id, calendar_id=account.google_calendar_id)
+    except HttpError as exc:
+        if getattr(exc.resp, "status", None) != 404:
+            raise
+
+
+def _process_calendar_sync_job(job_id: int) -> None:
+    with Session(engine) as session:
+        job = session.get(CalendarSyncJob, job_id)
+        if job is None or job.status not in ("pending", "retrying"):
+            return
+        if _ensure_utc(job.next_attempt_at) > datetime.now(timezone.utc):
+            return
+
+        job.status = "processing"
+        job.updated_at = datetime.now(timezone.utc)
+        session.add(job)
+        session.commit()
+
+    try:
+        with Session(engine) as session:
+            job = session.get(CalendarSyncJob, job_id)
+            if job is None:
+                return
+
+            account = session.get(Account, job.account_id)
+            event = session.get(Event, job.event_id) if job.event_id is not None else None
+
+            if job.operation == "upsert":
+                if account is None:
+                    session.delete(job)
+                    session.commit()
+                    return
+                if event is None or event.deleted_at is not None:
+                    session.delete(job)
+                    session.commit()
+                    return
+                _sync_event_to_calendar(session, account, event)
+                refreshed_job = session.get(CalendarSyncJob, job_id)
+                if refreshed_job is not None:
+                    session.delete(refreshed_job)
+                    session.commit()
+                return
+
+            if job.operation == "delete":
+                if account is None:
+                    if event is not None:
+                        session.delete(event)
+                    session.delete(job)
+                    session.commit()
+                    return
+
+                payload = _deserialize_sync_job_payload(job)
+                calendar_event_id = payload.get("calendar_event_id") or (event.calendar_event_id if event else None)
+                if calendar_event_id:
+                    _delete_calendar_event_from_google(account, calendar_event_id)
+                if event is not None:
+                    session.delete(event)
+                session.delete(job)
+                session.commit()
+                return
+
+            raise ValueError(f"Unsupported calendar sync job operation: {job.operation}")
+    except Exception as exc:
+        with Session(engine) as session:
+            job = session.get(CalendarSyncJob, job_id)
+            if job is None:
+                return
+
+            event = session.get(Event, job.event_id) if job.event_id is not None else None
+            error_message = _calendar_sync_error_message(exc)
+            now = datetime.now(timezone.utc)
+
+            job.attempt_count += 1
+            job.last_error = error_message
+            job.updated_at = now
+            if _is_retryable_calendar_error(exc):
+                job.status = "retrying"
+                job.next_attempt_at = now + timedelta(seconds=_calendar_sync_retry_delay_seconds(job.attempt_count))
+                if event is not None:
+                    _mark_event_sync_queued(event, error=error_message)
+                    session.add(event)
+                logger.warning("Calendar sync job %s will retry after error: %s", job_id, error_message)
+            else:
+                job.status = "failed"
+                job.completed_at = now
+                if event is not None:
+                    _mark_event_sync_failed(event, error_message)
+                    session.add(event)
+                logger.error("Calendar sync job %s failed permanently: %s", job_id, error_message)
+
+            session.add(job)
+            session.commit()
+
+
+def _process_calendar_sync_jobs(limit: int = CALENDAR_SYNC_MAX_BATCH_SIZE) -> int:
+    with Session(engine) as session:
+        now = datetime.now(timezone.utc)
+        due_job_ids = [
+            job.id
+            for job in session.exec(
+                select(CalendarSyncJob)
+                .where(
+                    CalendarSyncJob.status.in_(("pending", "retrying")),
+                    CalendarSyncJob.next_attempt_at <= now,
+                )
+                .order_by(CalendarSyncJob.created_at.asc())
+            ).all()
+            if job.id is not None
+        ][:limit]
+
+    for job_id in due_job_ids:
+        _process_calendar_sync_job(job_id)
+
+    return len(due_job_ids)
+
+
+def _calendar_sync_worker_loop() -> None:
+    while not _calendar_sync_stop_event.is_set():
+        processed_count = _process_calendar_sync_jobs()
+        if processed_count >= CALENDAR_SYNC_MAX_BATCH_SIZE:
+            continue
+        _calendar_sync_wakeup.wait(timeout=CALENDAR_SYNC_QUEUE_POLL_INTERVAL_SECONDS)
+        _calendar_sync_wakeup.clear()
+
+
+def _start_calendar_sync_worker() -> None:
+    global _calendar_sync_worker_thread
+    if not _calendar_sync_worker_enabled:
+        return
+    if _calendar_sync_worker_thread is not None and _calendar_sync_worker_thread.is_alive():
+        return
+
+    _calendar_sync_stop_event.clear()
+    _calendar_sync_wakeup.clear()
+    _calendar_sync_worker_thread = threading.Thread(
+        target=_calendar_sync_worker_loop,
+        name="calendar-sync-worker",
+        daemon=True,
+    )
+    _calendar_sync_worker_thread.start()
+
+
+def _stop_calendar_sync_worker() -> None:
+    global _calendar_sync_worker_thread
+    if _calendar_sync_worker_thread is None:
+        return
+
+    _calendar_sync_stop_event.set()
+    _calendar_sync_wakeup.set()
+    _calendar_sync_worker_thread.join(timeout=5)
+    _calendar_sync_worker_thread = None
+
+
 def _date_bounds(target_date: date, local_time_zone) -> tuple[datetime, datetime]:
     start_at_local = datetime.combine(target_date, time.min, tzinfo=local_time_zone)
     end_at_local = start_at_local + timedelta(days=1)
@@ -855,6 +1280,7 @@ def _delete_events_for_day(session: Session, account: Account, target_date: date
             Event.account_id == account.id,
             Event.start_time >= day_start,
             Event.start_time < day_end,
+            Event.deleted_at.is_(None),
         )
     ).all()
 
@@ -866,9 +1292,7 @@ def _delete_events_for_day(session: Session, account: Account, target_date: date
 
 
 def _delete_event(session: Session, account: Account, event: Event) -> None:
-    if account.google_calendar_id and event.calendar_event_id:
-        get_calendar_service().delete_event(event.calendar_event_id, calendar_id=account.google_calendar_id)
-    session.delete(event)
+    _queue_calendar_delete(session, account, event)
 
 
 def _sample_day_events(target_date: date, local_time_zone, buttons: list[TrackerButtonConfig], seed_value: str) -> list[dict]:
@@ -990,6 +1414,7 @@ def _apply_google_event_to_local(existing_event: Optional[Event], google_event: 
     event.google_description = google_event.get("description")
     event.calendar_event_id = google_event.get("id")
     event.google_etag = google_event.get("etag")
+    event.deleted_at = None
     updated = google_event.get("updated")
     event.google_updated_at = (
         _to_utc(datetime.fromisoformat(updated.replace("Z", "+00:00")))
@@ -997,6 +1422,7 @@ def _apply_google_event_to_local(existing_event: Optional[Event], google_event: 
         else event.google_updated_at
     )
     event.calendar_synced_at = datetime.now(timezone.utc)
+    _mark_event_synced(event)
     return event
 
 
@@ -1004,10 +1430,12 @@ def _update_event_sync_metadata_from_google(event: Event, google_event: dict) ->
     event.title = google_event.get("summary") or event.title or activity_label(event.type)
     event.google_description = google_event.get("description")
     event.google_etag = google_event.get("etag")
+    event.deleted_at = None
     updated = google_event.get("updated")
     if updated:
         event.google_updated_at = _to_utc(datetime.fromisoformat(updated.replace("Z", "+00:00")))
     event.calendar_synced_at = datetime.now(timezone.utc)
+    _mark_event_synced(event)
     return event
 
 
@@ -1041,7 +1469,6 @@ def _frontend_file_response(relative_path: str) -> Optional[FileResponse]:
 SQLModel.metadata.create_all(engine)
 _ensure_account_columns()
 _ensure_event_columns()
-
 
 @app.get("/health")
 def read_health():
@@ -1266,10 +1693,14 @@ def create_event_endpoint(event: EventCreate, session_context: SessionContext = 
             details=event.details,
             is_active=False,
         )
+        if account.google_calendar_id:
+            _mark_event_sync_pending(db_event)
+        else:
+            _mark_event_local_only(db_event)
         session.add(db_event)
         session.commit()
         session.refresh(db_event)
-        return _event_response(db_event)
+        return _event_response(db_event, account)
 
 
 @app.get("/events", response_model=list[EventResponse])
@@ -1277,9 +1708,11 @@ def list_events_endpoint(session_context: SessionContext = Depends(require_sessi
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         events = session.exec(
-            select(Event).where(Event.account_id == account.id).order_by(Event.start_time.desc())
+            select(Event)
+            .where(Event.account_id == account.id, Event.deleted_at.is_(None))
+            .order_by(Event.start_time.desc())
         ).all()
-        return [_event_response(event) for event in events]
+        return [_event_response(event, account) for event in events]
 
 
 @app.delete("/events/day", response_model=DayActionResponse)
@@ -1293,10 +1726,12 @@ def delete_events_for_day_endpoint(
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         deleted_count = _delete_events_for_day(session, account, parsed_date, local_time_zone)
+        _wake_calendar_sync_worker()
         return DayActionResponse(
             target_date=parsed_date.isoformat(),
             deleted_count=deleted_count,
-            synced_to_calendar=account.google_calendar_id is not None,
+            synced_to_calendar=False,
+            calendar_sync_state="queued" if account.google_calendar_id else "local_only",
         )
 
 
@@ -1305,13 +1740,14 @@ def delete_event_endpoint(event_id: int, session_context: SessionContext = Depen
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         event = session.exec(
-            select(Event).where(Event.id == event_id, Event.account_id == account.id)
+            select(Event).where(Event.id == event_id, Event.account_id == account.id, Event.deleted_at.is_(None))
         ).first()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
 
         _delete_event(session, account, event)
         session.commit()
+        _wake_calendar_sync_worker()
         return {"status": "success"}
 
 
@@ -1344,14 +1780,21 @@ def simulate_day_endpoint(
             session.add(event)
             session.commit()
             session.refresh(event)
-            _sync_event_to_calendar(session, account, event)
+            _mark_event_sync_pending(event)
+            session.add(event)
+            session.commit()
+            _queue_calendar_upsert(session, account, event)
+            session.commit()
             created_count += 1
+
+        _wake_calendar_sync_worker()
 
         return DayActionResponse(
             target_date=parsed_date.isoformat(),
             deleted_count=deleted_count,
             created_count=created_count,
-            synced_to_calendar=True,
+            synced_to_calendar=False,
+            calendar_sync_state="queued",
         )
 
 
@@ -1372,6 +1815,10 @@ def start_activity_endpoint(activity: ActivityStart, session_context: SessionCon
             details=activity.details.strip() if activity.details else None,
             is_active=True,
         )
+        if account.google_calendar_id:
+            _mark_event_sync_pending(db_event)
+        else:
+            _mark_event_local_only(db_event)
         session.add(db_event)
         session.commit()
         session.refresh(db_event)
@@ -1404,7 +1851,13 @@ def stop_activity_endpoint(activity: ActivityStop, session_context: SessionConte
         session.commit()
         session.refresh(db_event)
         if account.google_calendar_id:
-            db_event = _sync_event_to_calendar(session, account, db_event)
+            _queue_calendar_upsert(session, account, db_event)
+        else:
+            _mark_event_local_only(db_event)
+            session.add(db_event)
+        session.commit()
+        session.refresh(db_event)
+        _wake_calendar_sync_worker()
         return {
             "status": "success",
             "message": f"Stopped tracking '{activity_type}'",
@@ -1412,6 +1865,8 @@ def stop_activity_endpoint(activity: ActivityStop, session_context: SessionConte
             "start_time": start_time,
             "end_time": _ensure_utc(end_time),
             "duration_seconds": duration,
+            "calendar_sync_state": _event_sync_state(account, db_event),
+            "calendar_sync_message": _event_sync_message(_event_sync_state(account, db_event), db_event),
         }
 
 
@@ -1420,7 +1875,7 @@ def update_event_endpoint(event_id: int, event_update: EventUpdate, session_cont
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         event = session.exec(
-            select(Event).where(Event.id == event_id, Event.account_id == account.id)
+            select(Event).where(Event.id == event_id, Event.account_id == account.id, Event.deleted_at.is_(None))
         ).first()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -1429,9 +1884,16 @@ def update_event_endpoint(event_id: int, event_update: EventUpdate, session_cont
         session.add(event)
         session.commit()
         session.refresh(event)
-        if event.calendar_event_id:
-            event = _sync_event_to_calendar(session, account, event)
-        return _event_response(event)
+        if not event.is_active:
+            if account.google_calendar_id:
+                _queue_calendar_upsert(session, account, event)
+            else:
+                _mark_event_local_only(event)
+                session.add(event)
+            session.commit()
+            session.refresh(event)
+            _wake_calendar_sync_worker()
+        return _event_response(event, account)
 
 
 @app.post("/events/{event_id}/finalize", response_model=EventResponse)
@@ -1439,7 +1901,7 @@ def finalize_event_endpoint(event_id: int, event_finalize: EventFinalize, sessio
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         event = session.exec(
-            select(Event).where(Event.id == event_id, Event.account_id == account.id)
+            select(Event).where(Event.id == event_id, Event.account_id == account.id, Event.deleted_at.is_(None))
         ).first()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -1451,8 +1913,15 @@ def finalize_event_endpoint(event_id: int, event_finalize: EventFinalize, sessio
             session.refresh(event)
 
         if not event.is_active:
-            event = _sync_event_to_calendar(session, account, event)
-        return _event_response(event)
+            if account.google_calendar_id:
+                _queue_calendar_upsert(session, account, event)
+            else:
+                _mark_event_local_only(event)
+                session.add(event)
+            session.commit()
+            session.refresh(event)
+            _wake_calendar_sync_worker()
+        return _event_response(event, account)
 
 
 @app.get("/{full_path:path}")
