@@ -109,6 +109,12 @@ interface PendingLogItem {
   activityId: string;
 }
 
+function getApiErrorDetail(error: unknown): string | null {
+  return axios.isAxiosError(error) && typeof error.response?.data?.detail === 'string'
+    ? error.response.data.detail
+    : null;
+}
+
 function buildTrackerButtonsPayload(buttons: TrackerButtonConfig[]) {
   return {
     buttons: sortTrackerButtons(buttons).map((button, position) => ({
@@ -467,6 +473,10 @@ export default function App() {
       addToast('Username and password are required', 'error');
       return;
     }
+    if (authMode === 'register' && password.length < 6) {
+      addToast('Password must be at least 6 characters', 'error');
+      return;
+    }
 
     setIsBusy(true);
     try {
@@ -484,7 +494,7 @@ export default function App() {
       setActiveView('tracker');
       addToast(authMode === 'register' ? 'Account created' : 'Signed in', 'success');
     } catch (error) {
-      addToast(authMode === 'register' ? 'Failed to create account' : 'Failed to sign in', 'error');
+      addToast(getApiErrorDetail(error) ?? (authMode === 'register' ? 'Failed to create account' : 'Failed to sign in'), 'error');
       console.error('Authentication error:', error);
     } finally {
       setIsBusy(false);
@@ -693,10 +703,7 @@ export default function App() {
         addToast('Buttons saved', 'success');
       }
     } catch (error) {
-      const errorDetail =
-        axios.isAxiosError(error) && typeof error.response?.data?.detail === 'string'
-          ? error.response.data.detail
-          : null;
+      const errorDetail = getApiErrorDetail(error);
 
       if (latestButtonsPayloadRef.current === payloadKey) {
         setButtonsSaveError(errorDetail ?? 'Failed to save changes');
@@ -1189,10 +1196,11 @@ export default function App() {
                 placeholder="Password"
                 className="app-input app-focus w-full rounded-2xl border px-4 py-3"
               />
+            {authMode === 'register' && <p className="app-muted -mt-2 text-xs">Password must be at least 6 characters.</p>}
             {authMode === 'register' && (
-              <input
-                  value={registerBabyName}
-                  onChange={(event) => setRegisterBabyName(event.target.value)}
+            <input
+                value={registerBabyName}
+                onChange={(event) => setRegisterBabyName(event.target.value)}
                   placeholder="Baby name (optional)"
                   className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                 />
