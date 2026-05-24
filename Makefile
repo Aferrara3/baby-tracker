@@ -1,4 +1,4 @@
-.PHONY: dev install clean
+.PHONY: dev install install-db-backups clean
 
 # Setup dependencies for both backend and frontend
 install:
@@ -12,6 +12,9 @@ dev:
 	npx --yes concurrently --kill-others --names "BACKEND,FRONTEND" --prefix-colors "blue,green" \
 		"cd backend && DB_PATH=database-dev.db ./venv/bin/python main.py" \
 		"cd frontend && npm run dev"
+
+install-db-backups:
+	./scripts/install-db-backup-cron.sh
 
 # Clean up build artifacts and dependencies
 clean:

@@ -11,6 +11,7 @@ backend/.mypy_cache/
 # Local database
 backend/database.db
 backend/*.db
+db-snapshots/
 
 # Node / Vite
 frontend/node_modules/

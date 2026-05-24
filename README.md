@@ -44,6 +44,34 @@ npm run dev
 
 The frontend runs on `http://localhost:3005`.
 
+### Database snapshots
+
+Run the snapshot script from the repo root to copy every `*.db` file into a timestamped folder under `db-snapshots/`:
+
+```bash
+./scripts/backup-db-snapshots.sh
+```
+
+The script deletes snapshot folders older than 30 days by default. You can override the retention window for a run with `RETENTION_DAYS=...`.
+
+Install the default daily cron job at 2:30 AM:
+
+```bash
+make install-db-backups
+```
+
+The installer is idempotent and rewrites only the `baby-tracker-db-backups` cron entry. You can override the schedule or log path when installing:
+
+```bash
+DB_BACKUP_CRON_SCHEDULE="0 3 * * *" DB_BACKUP_LOG_PATH="/tmp/baby-tracker-db-backups.log" make install-db-backups
+```
+
+Equivalent cron entry:
+
+```bash
+30 2 * * * cd /path/to/baby-tracker && ./scripts/backup-db-snapshots.sh >> /tmp/baby-tracker-db-snapshots.log 2>&1
+```
+
 ## Deployment notes
 
 - Preferred deployment shape is a single origin that serves the built frontend and the FastAPI API together.
