@@ -124,16 +124,20 @@ class FakeCalendarService:
 @pytest.fixture()
 def client(tmp_path):
     database_path = tmp_path / "test.db"
+    custom_icon_dir = tmp_path / "custom-icons"
     test_engine = create_engine(f"sqlite:///{database_path}", connect_args={"check_same_thread": False})
 
     old_engine = main.engine
     old_service = main._calendar_service
     old_worker_enabled = main._calendar_sync_worker_enabled
+    old_custom_icon_storage_dir = main.CUSTOM_ICON_STORAGE_DIR
 
     main.engine = test_engine
     main._calendar_service = FakeCalendarService()
     main._calendar_sync_worker_enabled = False
+    main.CUSTOM_ICON_STORAGE_DIR = custom_icon_dir
     main._stop_calendar_sync_worker()
+    main._prepare_custom_icon_storage()
 
     SQLModel.metadata.create_all(main.engine)
     main._ensure_account_columns()
@@ -145,6 +149,7 @@ def client(tmp_path):
     main.engine = old_engine
     main._calendar_service = old_service
     main._calendar_sync_worker_enabled = old_worker_enabled
+    main.CUSTOM_ICON_STORAGE_DIR = old_custom_icon_storage_dir
     main._stop_calendar_sync_worker()
 
 
@@ -213,6 +218,95 @@ def test_tracker_buttons_endpoint_returns_seeded_defaults(client: TestClient):
     }
     assert any(symbol["key"] == "dumbbell" for symbol in payload["available_symbols"])
     assert payload["buttons"][0]["title"] == "🍼 Bottle"
+
+
+def test_custom_icons_are_created_and_listed_in_tracker_symbols(client: TestClient):
+    data = register(client, "custom-icons", "secret123")
+    headers = auth_headers(data["token"])
+
+    response = client.post(
+        "/custom-icons",
+        headers=headers,
+        data={
+            "label": "Pizza Slice",
+            "emoji": "🍕",
+            "keywords": "pizza,dinner,food",
+            "is_public": "true",
+        },
+        files={"asset": ("pizza.png", b"fake-png", "image/png")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["key"].startswith("custom:")
+    assert payload["icon_kind"] == "custom"
+    assert payload["image_url"].startswith("/custom-icons/assets/")
+    assert payload["is_public"] is True
+
+    tracker_buttons = client.get("/tracker-buttons", headers=headers)
+    assert tracker_buttons.status_code == 200
+    available_symbols = tracker_buttons.json()["available_symbols"]
+    created_symbol = next(symbol for symbol in available_symbols if symbol["key"] == payload["key"])
+    assert created_symbol["label"] == "Pizza Slice"
+    assert created_symbol["emoji"] == "🍕"
+    assert created_symbol["icon_kind"] == "custom"
+
+    asset_response = client.get(payload["image_url"])
+    assert asset_response.status_code == 200
+    assert asset_response.content == b"fake-png"
+
+
+def test_custom_icon_rejects_non_emoji_calendar_value(client: TestClient):
+    data = register(client, "custom-icons-invalid", "secret123")
+    headers = auth_headers(data["token"])
+
+    response = client.post(
+        "/custom-icons",
+        headers=headers,
+        data={
+            "label": "Not Valid",
+            "emoji": "ambulance",
+        },
+        files={"asset": ("pizza.png", b"fake-png", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Custom icon emoji must be a valid emoji"
+
+
+def test_deleting_custom_icon_removes_it_and_falls_back_existing_buttons(client: TestClient):
+    data = register(client, "custom-icons-delete", "secret123")
+    headers = auth_headers(data["token"])
+
+    created = client.post(
+        "/custom-icons",
+        headers=headers,
+        data={
+            "label": "Penne",
+            "emoji": "🍝",
+        },
+        files={"asset": ("penne.png", b"fake-png", "image/png")},
+    )
+    assert created.status_code == 200
+    created_symbol = created.json()
+    custom_icon_id = int(created_symbol["key"].removeprefix("custom:"))
+
+    existing_buttons = client.get("/tracker-buttons", headers=headers)
+    assert existing_buttons.status_code == 200
+    buttons_payload = existing_buttons.json()["buttons"]
+    buttons_payload[0]["icon_key"] = created_symbol["key"]
+
+    saved = client.patch("/tracker-buttons", headers=headers, json={"buttons": buttons_payload})
+    assert saved.status_code == 200
+    assert saved.json()["buttons"][0]["icon_key"] == created_symbol["key"]
+
+    deleted = client.delete(f"/custom-icons/{custom_icon_id}", headers=headers)
+    assert deleted.status_code == 200
+
+    refreshed = client.get("/tracker-buttons", headers=headers)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["buttons"][0]["icon_key"] == "help-circle"
+    assert all(symbol["key"] != created_symbol["key"] for symbol in refreshed.json()["available_symbols"])
 
 
 def test_tracker_buttons_accept_multiple_pages(client: TestClient):
@@ -547,6 +641,7 @@ def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClie
                     "icon_key": "dumbbell",
                     "color_key": button["color_key"],
                     "position": button["position"],
+                    "emoji_override": "💪",
                 }
             )
         else:
@@ -557,12 +652,13 @@ def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClie
                     "icon_key": button["icon_key"],
                     "color_key": button["color_key"],
                     "position": button["position"],
+                    "emoji_override": button.get("emoji_override"),
                 }
             )
 
     saved = client.patch("/tracker-buttons", headers=headers, json={"buttons": updated_buttons})
     assert saved.status_code == 200
-    assert next(button for button in saved.json()["buttons"] if button["id"] == "bottle")["title"] == "🏋️ Workout"
+    assert next(button for button in saved.json()["buttons"] if button["id"] == "bottle")["title"] == "💪 Workout"
 
     created = client.post(
         "/events",
@@ -570,7 +666,7 @@ def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClie
         json={"type": "bottle", "start_time": datetime.now(timezone.utc).isoformat()},
     )
     assert created.status_code == 200
-    assert created.json()["title"] == "🏋️ Workout"
+    assert created.json()["title"] == "💪 Workout"
 
     finalized = client.post(
         f"/events/{created.json()['id']}/finalize",
@@ -578,11 +674,11 @@ def test_custom_tracker_button_changes_event_and_calendar_title(client: TestClie
         json={"details": "customized"},
     )
     assert finalized.status_code == 200
-    assert finalized.json()["title"] == "🏋️ Workout"
+    assert finalized.json()["title"] == "💪 Workout"
 
     fake_service = main.get_calendar_service()
     drain_calendar_jobs()
-    assert fake_service.created_events[-1]["summary"] == "🏋️ Workout"
+    assert fake_service.created_events[-1]["summary"] == "💪 Workout"
 
 
 def test_updating_settings_renames_service_managed_calendar(client: TestClient):

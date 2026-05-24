@@ -68,6 +68,8 @@ class AppProfile(BaseModel):
 _cached_profile: Optional[AppProfile] = None
 _cached_profile_path: Optional[Path] = None
 _cached_profile_mtime_ns: Optional[int] = None
+_cached_lucide_symbols: Optional[list[dict[str, object]]] = None
+_cached_lucide_symbols_mtime_ns: Optional[int] = None
 
 
 def resolve_profile_config_path() -> Path:
@@ -111,8 +113,49 @@ def get_app_profile(force_reload: bool = False) -> AppProfile:
     return profile
 
 
+def _lucide_catalog_path() -> Path:
+    return REPO_ROOT / "shared" / "lucide-catalog.json"
+
+
+def get_lucide_catalog(force_reload: bool = False) -> list[dict[str, object]]:
+    global _cached_lucide_symbols, _cached_lucide_symbols_mtime_ns
+
+    path = _lucide_catalog_path()
+    stat = path.stat()
+    if (
+        not force_reload
+        and _cached_lucide_symbols is not None
+        and _cached_lucide_symbols_mtime_ns == stat.st_mtime_ns
+    ):
+        return _cached_lucide_symbols
+
+    catalog = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    normalized_catalog = [
+        {
+            "key": str(symbol.get("key", "")).strip(),
+            "label": str(symbol.get("label", "")).strip(),
+            "emoji": str(symbol.get("emoji", "🏷️")).strip() or "🏷️",
+            "keywords": [str(keyword) for keyword in symbol.get("keywords", [])],
+            "category": str(symbol.get("category", "general")).strip() or "general",
+            "icon_kind": "lucide",
+        }
+        for symbol in catalog
+        if str(symbol.get("key", "")).strip()
+    ]
+
+    _cached_lucide_symbols = normalized_catalog
+    _cached_lucide_symbols_mtime_ns = stat.st_mtime_ns
+    return normalized_catalog
+
+
 def get_profile_symbols() -> list[dict[str, object]]:
-    return [symbol.model_dump() for symbol in get_app_profile().symbols]
+    merged_symbols = {str(symbol["key"]): dict(symbol) for symbol in get_lucide_catalog()}
+    for symbol in get_app_profile().symbols:
+        merged_symbol = merged_symbols.get(symbol.key, {})
+        merged_symbol.update(symbol.model_dump())
+        merged_symbol["icon_kind"] = merged_symbol.get("icon_kind", "lucide")
+        merged_symbols[symbol.key] = merged_symbol
+    return list(merged_symbols.values())
 
 
 def get_profile_symbol_meta() -> dict[str, dict[str, object]]:
@@ -121,6 +164,8 @@ def get_profile_symbol_meta() -> dict[str, dict[str, object]]:
             "label": str(symbol["label"]),
             "emoji": str(symbol["emoji"]),
             "keywords": [str(keyword) for keyword in symbol["keywords"]],
+            "category": str(symbol.get("category", "general")),
+            "icon_kind": str(symbol.get("icon_kind", "lucide")),
         }
         for symbol in get_profile_symbols()
     }

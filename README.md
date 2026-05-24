@@ -7,6 +7,7 @@ Baby activity tracker with a FastAPI backend, React frontend, SQLite storage, an
 - Household-scoped accounts with username/password sign-in
 - Activity logging for bottle, food, diaper, sleep, breastfeeding, pump, and help
 - Customizable paged tracker grid with add/remove pages, reorderable labels, and symbol-based Google Calendar emoji mapping
+- Search-first icon picker backed by the full Lucide catalog plus custom/community icon uploads
 - Tap-to-log and hold-to-start/stop timer flows
 - Service-account-managed Google Calendar provisioning and sharing
 - Google Calendar write sync plus pull-based reconciliation back into SQLite
@@ -103,6 +104,7 @@ Equivalent cron entry:
   - `APP_PROFILE_CONFIG_PATH`
   - `APP_HOST` / `APP_PORT`
   - `DB_PATH` or `DATABASE_URL`
+  - `CUSTOM_ICON_STORAGE_DIR`
   - `CORS_ALLOWED_ORIGINS`
   - `GOOGLE_CREDENTIALS_PATH`
   - `FRONTEND_DIST_PATH`

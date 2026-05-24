@@ -1,11 +1,13 @@
 import { useRef, useState, type CSSProperties } from 'react';
 import { clsx } from 'clsx';
-import type { LucideIcon } from 'lucide-react';
+
+import TrackerSymbolIcon from './TrackerSymbolIcon';
+import type { TrackerSymbolOption } from '../trackerButtons';
 
 interface ActivityButtonProps {
   activity: {
     id: string;
-    icon: LucideIcon;
+    symbol?: TrackerSymbolOption;
     label: string;
     colorClass: string;
   };
@@ -27,8 +29,6 @@ export default function ActivityButton({
   const [isPressed, setIsPressed] = useState(false);
   const pressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
-
-  const Icon = activity.icon;
 
   const startPress = () => {
     setIsPressed(true);
@@ -100,11 +100,7 @@ export default function ActivityButton({
         )}
         style={isRunning ? ({ '--tw-ring-color': 'var(--app-ring)' } as CSSProperties) : undefined}
       >
-        <Icon 
-          size={32} 
-          className="text-white drop-shadow-sm" 
-          strokeWidth={2.5}
-        />
+        <TrackerSymbolIcon symbol={activity.symbol} size={32} className="text-white drop-shadow-sm" strokeWidth={2.5} />
         {isRunning && (
           <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full border-2 border-white animate-ping" />
         )}

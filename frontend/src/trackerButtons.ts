@@ -1,90 +1,3 @@
-import {
-  AlarmClock,
-  Apple,
-  Baby,
-  Banknote,
-  Bath,
-  Bed,
-  Beef,
-  Beer,
-  BicepsFlexed,
-  Bike,
-  Bird,
-  Bone,
-  BookOpen,
-  BottleWine,
-  Briefcase,
-  Bus,
-  Cake,
-  CalendarCheck,
-  CalendarHeart,
-  CarFront,
-  Camera,
-  Carrot,
-  Cat,
-  ClipboardList,
-  Coffee,
-  CookingPot,
-  Cookie,
-  CupSoda,
-  Dog,
-  Droplet,
-  Drumstick,
-  Dumbbell,
-  Fish,
-  Footprints,
-  ForkKnife,
-  Frown,
-  Gamepad2,
-  Gift,
-  HandHeart,
-  Heart,
-  HeartPulse,
-  HelpCircle,
-  House,
-  IceCreamBowl,
-  Laptop,
-  Leaf,
-  Martini,
-  Milk,
-  Moon,
-  MoonStar,
-  Music4,
-  NotebookPen,
-  PawPrint,
-  Phone,
-  Pill,
-  PillBottle,
-  Pizza,
-  Plane,
-  Popcorn,
-  Rabbit,
-  Salad,
-  Sandwich,
-  ScanHeart,
-  ShoppingCart,
-  ShoppingBag,
-  ShowerHead,
-  Smile,
-  Soup,
-  Sparkles,
-  Stethoscope,
-  Sun,
-  Syringe,
-  TentTree,
-  Thermometer,
-  Timer,
-  Toilet,
-  TrainFront,
-  User2,
-  Utensils,
-  UtensilsCrossed,
-  Wallet,
-  WavesLadder,
-  Wine,
-  type LucideIcon,
-} from 'lucide-react';
-
 export interface TrackerButtonConfig {
   id: string;
   label: string;
@@ -93,6 +6,9 @@ export interface TrackerButtonConfig {
   position: number;
   emoji: string;
   title: string;
+  emoji_override?: string | null;
+  icon_kind?: 'lucide' | 'custom';
+  image_url?: string | null;
 }
 
 export interface TrackerButtonUpdate {
@@ -101,6 +17,7 @@ export interface TrackerButtonUpdate {
   icon_key: string;
   color_key: string;
   position: number;
+  emoji_override?: string | null;
 }
 
 export interface TrackerSymbolOption {
@@ -108,6 +25,11 @@ export interface TrackerSymbolOption {
   label: string;
   emoji: string;
   keywords: string[];
+  category?: string | null;
+  icon_kind?: 'lucide' | 'custom';
+  image_url?: string | null;
+  is_public?: boolean | null;
+  can_delete?: boolean | null;
 }
 
 export interface TrackerButtonsResponse {
@@ -118,95 +40,20 @@ export interface TrackerButtonsResponse {
 export const TRACKER_BUTTONS_PER_PAGE = 8;
 export const MAX_TRACKER_BUTTON_PAGES = 3;
 const PLACEHOLDER_PAGE_PREFIX = 'extra_page';
+export const TRACKER_BUTTON_COLOR_KEYS = ['blue', 'amber', 'cyan', 'pink', 'indigo', 'rose', 'orange', 'slate'] as const;
+export const TRACKER_BUTTON_COLOR_OPTIONS = [
+  { key: 'blue', label: 'Blue' },
+  { key: 'amber', label: 'Amber' },
+  { key: 'cyan', label: 'Cyan' },
+  { key: 'pink', label: 'Pink' },
+  { key: 'indigo', label: 'Indigo' },
+  { key: 'rose', label: 'Rose' },
+  { key: 'orange', label: 'Orange' },
+  { key: 'slate', label: 'Slate' },
+] as const;
 const FALLBACK_SYMBOLS: TrackerSymbolOption[] = [
-  { key: 'help-circle', label: 'Other', emoji: '❓', keywords: ['other'] },
+  { key: 'help-circle', label: 'Other', emoji: '❓', keywords: ['other'], icon_kind: 'lucide' },
 ];
-
-const ICONS_BY_KEY: Record<string, LucideIcon> = {
-  'alarm-clock': AlarmClock,
-  apple: Apple,
-  baby: Baby,
-  banknote: Banknote,
-  bath: Bath,
-  bed: Bed,
-  beef: Beef,
-  beer: Beer,
-  'biceps-flexed': BicepsFlexed,
-  bike: Bike,
-  bird: Bird,
-  bone: Bone,
-  'book-open': BookOpen,
-  'bottle-wine': BottleWine,
-  briefcase: Briefcase,
-  bus: Bus,
-  cake: Cake,
-  'calendar-check': CalendarCheck,
-  'calendar-heart': CalendarHeart,
-  'car-front': CarFront,
-  camera: Camera,
-  carrot: Carrot,
-  cat: Cat,
-  'clipboard-list': ClipboardList,
-  coffee: Coffee,
-  'cooking-pot': CookingPot,
-  cookie: Cookie,
-  'cup-soda': CupSoda,
-  dog: Dog,
-  droplet: Droplet,
-  drumstick: Drumstick,
-  dumbbell: Dumbbell,
-  fish: Fish,
-  footprints: Footprints,
-  'fork-knife': ForkKnife,
-  frown: Frown,
-  'gamepad-2': Gamepad2,
-  gift: Gift,
-  'hand-heart': HandHeart,
-  heart: Heart,
-  'heart-pulse': HeartPulse,
-  'help-circle': HelpCircle,
-  house: House,
-  'ice-cream-bowl': IceCreamBowl,
-  laptop: Laptop,
-  leaf: Leaf,
-  martini: Martini,
-  milk: Milk,
-  moon: Moon,
-  'moon-star': MoonStar,
-  'music-4': Music4,
-  'notebook-pen': NotebookPen,
-  'paw-print': PawPrint,
-  phone: Phone,
-  pill: Pill,
-  'pill-bottle': PillBottle,
-  pizza: Pizza,
-  plane: Plane,
-  popcorn: Popcorn,
-  rabbit: Rabbit,
-  salad: Salad,
-  sandwich: Sandwich,
-  'scan-heart': ScanHeart,
-  'shopping-bag': ShoppingBag,
-  'shopping-cart': ShoppingCart,
-  'shower-head': ShowerHead,
-  smile: Smile,
-  soup: Soup,
-  sparkles: Sparkles,
-  stethoscope: Stethoscope,
-  sun: Sun,
-  syringe: Syringe,
-  'tent-tree': TentTree,
-  thermometer: Thermometer,
-  timer: Timer,
-  toilet: Toilet,
-  'train-front': TrainFront,
-  'user-2': User2,
-  utensils: Utensils,
-  'utensils-crossed': UtensilsCrossed,
-  wallet: Wallet,
-  'waves-ladder': WavesLadder,
-  wine: Wine,
-};
 
 const COLOR_CLASS_BY_KEY: Record<string, string> = {
   blue: 'tracker-color-blue',
@@ -219,10 +66,6 @@ const COLOR_CLASS_BY_KEY: Record<string, string> = {
   slate: 'tracker-color-slate',
 };
 
-export function getTrackerButtonIcon(iconKey: string): LucideIcon {
-  return ICONS_BY_KEY[iconKey] ?? HelpCircle;
-}
-
 export function getTrackerButtonColorClass(colorKey: string): string {
   return COLOR_CLASS_BY_KEY[colorKey] ?? COLOR_CLASS_BY_KEY.slate;
 }
@@ -231,11 +74,30 @@ export function getTrackerSymbol(symbols: TrackerSymbolOption[], iconKey: string
   return symbols.find((symbol) => symbol.key === iconKey) ?? FALLBACK_SYMBOLS.find((symbol) => symbol.key === iconKey);
 }
 
+export function isValidEmojiValue(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 16) {
+    return false;
+  }
+  if (/\s/u.test(normalized)) {
+    return false;
+  }
+  return /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}]/u.test(normalized);
+}
+
+export function resolveTrackerButtonEmoji(button: TrackerButtonUpdate | TrackerButtonConfig, symbols: TrackerSymbolOption[]): string {
+  const emojiOverride = button.emoji_override?.trim();
+  if (emojiOverride) {
+    return emojiOverride;
+  }
+  return getTrackerSymbol(symbols, button.icon_key)?.emoji ?? '🏷️';
+}
+
 export function deriveTrackerButton(button: TrackerButtonUpdate | TrackerButtonConfig, symbols: TrackerSymbolOption[]): TrackerButtonConfig {
   const rawLabel = button.label;
   const label = rawLabel.trim() || 'Untitled';
   const symbol = getTrackerSymbol(symbols, button.icon_key);
-  const emoji = symbol?.emoji ?? '🏷️';
+  const emoji = resolveTrackerButtonEmoji(button, symbols);
 
   return {
     id: button.id,
@@ -245,6 +107,9 @@ export function deriveTrackerButton(button: TrackerButtonUpdate | TrackerButtonC
     position: button.position,
     emoji,
     title: `${emoji} ${label}`,
+    emoji_override: button.emoji_override?.trim() || null,
+    icon_kind: symbol?.icon_kind ?? 'lucide',
+    image_url: symbol?.image_url ?? null,
   };
 }
 
@@ -259,55 +124,51 @@ export function normalizeTrackerButtons(buttons: TrackerButtonConfig[], symbols:
 function createUniqueTrackerButtonId(baseId: string, existingIds: Set<string>): string {
   let candidateId = baseId;
   let suffix = 2;
-
   while (existingIds.has(candidateId)) {
     candidateId = `${baseId}_${suffix}`;
     suffix += 1;
   }
-
-  existingIds.add(candidateId);
   return candidateId;
 }
 
-export function getTrackerButtonPageCount(buttons: { position: number }[]): number {
-  return Math.max(1, Math.ceil(buttons.length / TRACKER_BUTTONS_PER_PAGE));
-}
-
-export function getTrackerButtonsForPage<T extends { position: number }>(buttons: T[], pageIndex: number): T[] {
-  const orderedButtons = sortTrackerButtons(buttons);
-  const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
-  return orderedButtons.slice(start, start + TRACKER_BUTTONS_PER_PAGE);
+function pagePlaceholderButtonId(pageIndex: number, slotIndex: number) {
+  return `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`;
 }
 
 export function createTrackerButtonsForPage(
+  buttons: TrackerButtonConfig[],
   pageIndex: number,
-  symbols: TrackerSymbolOption[],
-  existingButtons: Pick<TrackerButtonConfig, 'id'>[] = [],
-  buttonTemplates: Array<Pick<TrackerButtonConfig, 'id' | 'label' | 'icon_key' | 'color_key' | 'position'>> = [],
-  placeholderButtonLabelPrefix = 'Other',
+  placeholderLabelPrefix: string,
 ): TrackerButtonConfig[] {
-  const pageStart = pageIndex * TRACKER_BUTTONS_PER_PAGE;
-  const existingIds = new Set(existingButtons.map((button) => button.id));
-  const templateButtons = getTrackerButtonsForPage(buttonTemplates, pageIndex);
-  const baseButtons =
-    templateButtons.length === TRACKER_BUTTONS_PER_PAGE
-      ? templateButtons
-      : Array.from({ length: TRACKER_BUTTONS_PER_PAGE }, (_, slotIndex) => ({
-          id: `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`,
-          label: `${placeholderButtonLabelPrefix} ${slotIndex + 1}`,
-          icon_key: 'help-circle',
-          color_key: 'slate',
-          position: pageStart + slotIndex,
-        }));
+  const normalizedButtons = normalizeTrackerButtons(buttons, FALLBACK_SYMBOLS);
+  const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
+  const existingPageButtons = normalizedButtons.slice(start, start + TRACKER_BUTTONS_PER_PAGE);
+  const existingIds = new Set(normalizedButtons.map((button) => button.id));
 
-  return baseButtons.map((button, index) =>
-    deriveTrackerButton(
+  const placeholders = Array.from({ length: TRACKER_BUTTONS_PER_PAGE - existingPageButtons.length }, (_, offset) => {
+    const slotIndex = existingPageButtons.length + offset;
+    const placeholderId = createUniqueTrackerButtonId(pagePlaceholderButtonId(pageIndex, slotIndex), existingIds);
+    existingIds.add(placeholderId);
+    return deriveTrackerButton(
       {
-        ...button,
-        id: createUniqueTrackerButtonId(button.id, existingIds),
-        position: pageStart + index,
+        id: placeholderId,
+        label: `${placeholderLabelPrefix} ${pageIndex + 1}-${slotIndex + 1}`,
+        icon_key: 'help-circle',
+        color_key: TRACKER_BUTTON_COLOR_KEYS[(start + slotIndex) % TRACKER_BUTTON_COLOR_KEYS.length],
+        position: start + slotIndex,
       },
-      symbols,
-    ),
-  );
+      FALLBACK_SYMBOLS,
+    );
+  });
+
+  return normalizeTrackerButtons([...normalizedButtons.slice(0, start), ...existingPageButtons, ...placeholders], FALLBACK_SYMBOLS);
+}
+
+export function getTrackerButtonPageCount(buttons: TrackerButtonConfig[]): number {
+  return Math.max(1, Math.ceil(buttons.length / TRACKER_BUTTONS_PER_PAGE));
+}
+
+export function getTrackerButtonsForPage(buttons: TrackerButtonConfig[], pageIndex: number): TrackerButtonConfig[] {
+  const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
+  return sortTrackerButtons(buttons).slice(start, start + TRACKER_BUTTONS_PER_PAGE);
 }
