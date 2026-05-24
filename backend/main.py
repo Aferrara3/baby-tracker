@@ -1669,12 +1669,18 @@ def sync_calendar_changes(session_context: SessionContext = Depends(require_sess
         account = _load_account(session, session_context.account_id)
         try:
             return _sync_google_calendar_to_db(session, account)
-        except Exception:
+        except HTTPException:
+            raise
+        except Exception as exc:
             account.google_last_sync_status = "error"
             account.updated_at = datetime.now(timezone.utc)
             session.add(account)
             session.commit()
-            raise
+            logger.warning("Google pull sync failed for account %s: %s", account.id, _calendar_sync_error_message(exc))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Google pull sync temporarily unavailable",
+            ) from exc
 
 
 @app.post("/events", response_model=EventResponse)

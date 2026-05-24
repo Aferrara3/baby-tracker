@@ -24,6 +24,7 @@ class FakeCalendarService:
         self.create_failures: list[Exception] = []
         self.update_failures: list[Exception] = []
         self.delete_failures: list[Exception] = []
+        self.sync_failures: list[Exception] = []
 
     def create_event_from_baby_event(self, event, calendar_id=None) -> dict:
         if self.create_failures:
@@ -103,6 +104,8 @@ class FakeCalendarService:
         )
 
     def list_event_changes(self, calendar_id=None, sync_token=None) -> dict:
+        if self.sync_failures:
+            raise self.sync_failures.pop(0)
         if self.sync_responses:
             response = self.sync_responses.pop(0)
             return {
@@ -987,6 +990,22 @@ def test_google_sync_reassigns_type_when_title_matches_known_activity(client: Te
     assert event["type"] == "sleep"
     assert event["title"] == "😴 Sleep"
     assert event["details"] == "retitled in google"
+
+
+def test_google_pull_sync_transient_failure_returns_503_and_marks_status_error(client: TestClient):
+    data = register(client, "google-pull-error-user", "secret123")
+    headers = auth_headers(data["token"])
+    client.post("/calendar/enable-sync", headers=headers)
+
+    fake_service = main.get_calendar_service()
+    fake_service.sync_failures.append(OSError("tls reset"))
+
+    synced = client.post("/calendar/sync", headers=headers)
+    assert synced.status_code == 503
+    assert synced.json()["detail"] == "Google pull sync temporarily unavailable"
+
+    me = client.get("/auth/me", headers=headers).json()
+    assert me["google_last_sync_status"] == "error"
 
 
 def test_transient_google_create_failure_keeps_event_saved_and_retries(client: TestClient):
