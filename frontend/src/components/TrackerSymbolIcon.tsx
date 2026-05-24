@@ -15,6 +15,10 @@ const FALLBACK_SYMBOL: TrackerSymbolOption = {
   icon_kind: 'lucide',
 };
 const CUSTOM_ICON_SCALE_MULTIPLIER = 1.2;
+const LEGACY_ICON_KEY_ALIASES: Record<string, string> = {
+  'help-circle': 'circle-question-mark',
+  'user-2': 'user-round',
+};
 
 function resolveCustomIconUrl(imageUrl: string): string {
   if (/^(?:https?:)?\/\//.test(imageUrl) || imageUrl.startsWith('data:') || imageUrl.startsWith('blob:')) {
@@ -42,6 +46,9 @@ export default function TrackerSymbolIcon({
 }) {
   const resolvedSymbol = symbol ?? (iconKey ? getTrackerSymbol([FALLBACK_SYMBOL], iconKey) : FALLBACK_SYMBOL);
   const resolvedIconKey = resolvedSymbol?.key ?? iconKey ?? FALLBACK_SYMBOL.key;
+  const renderIconKey = ICON_NODES_BY_KEY[resolvedIconKey]
+    ? resolvedIconKey
+    : LEGACY_ICON_KEY_ALIASES[resolvedIconKey] ?? resolvedIconKey;
 
   if (resolvedSymbol?.icon_kind === 'custom' && resolvedSymbol.image_url) {
     const customRenderSize = size * CUSTOM_ICON_SCALE_MULTIPLIER;
@@ -63,7 +70,10 @@ export default function TrackerSymbolIcon({
     );
   }
 
-  const iconNodes = ICON_NODES_BY_KEY[resolvedIconKey] ?? ICON_NODES_BY_KEY[FALLBACK_SYMBOL.key] ?? [];
+  const iconNodes =
+    ICON_NODES_BY_KEY[renderIconKey] ??
+    ICON_NODES_BY_KEY[LEGACY_ICON_KEY_ALIASES[FALLBACK_SYMBOL.key] ?? FALLBACK_SYMBOL.key] ??
+    [];
   return (
     <svg
       width={size}

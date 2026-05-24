@@ -846,10 +846,18 @@ export default function App() {
       }
 
       nextPageIndex = currentPageCount;
-      nextPageButtons = getTrackerButtonsForPage(
-        createTrackerButtonsForPage(orderedButtons, currentPageCount, appConfig.placeholder_button_label_prefix),
-        currentPageCount,
-      ).map((button) => deriveTrackerButton(button, availableSymbols));
+      const templateButtons = getTrackerButtonsForPage(appConfig.button_templates, currentPageCount);
+      if (templateButtons.length === TRACKER_BUTTONS_PER_PAGE) {
+        nextPageButtons = normalizeTrackerButtons(templateButtons, availableSymbols).map((button, index) => ({
+          ...button,
+          position: currentPageCount * TRACKER_BUTTONS_PER_PAGE + index,
+        }));
+      } else {
+        nextPageButtons = getTrackerButtonsForPage(
+          createTrackerButtonsForPage(orderedButtons, currentPageCount, appConfig.placeholder_button_label_prefix),
+          currentPageCount,
+        ).map((button) => deriveTrackerButton(button, availableSymbols));
+      }
 
       return [...orderedButtons, ...nextPageButtons].map((button, index) => ({
         ...button,
