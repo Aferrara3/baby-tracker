@@ -19,7 +19,14 @@ Baby activity tracker with a FastAPI backend, React frontend, SQLite storage, an
 
 ## Local development
 
-Copy `.env.example` to `.env` at the repo root to override local backend settings.
+Copy `.env.example` to `.env` at the repo root to override local settings.
+
+Use `APP_PROFILE_CONFIG_PATH` to select which app profile the shared codebase should run, for example:
+
+```bash
+APP_PROFILE_CONFIG_PATH=app-profiles/baby-app-config.yaml
+APP_PROFILE_CONFIG_PATH=app-profiles/habit-app-config.yaml
+```
 
 ### Backend
 
@@ -32,7 +39,7 @@ python main.py
 ```
 
 The API runs on `http://localhost:8090`.
-Local development uses `backend/database-dev.db`.
+Local development defaults to `backend/database-dev.db`.
 
 ### Frontend
 
@@ -43,6 +50,19 @@ npm run dev
 ```
 
 The frontend runs on `http://localhost:3005`.
+
+### Combined dev command
+
+From the repo root:
+
+```bash
+make dev
+make dev PROFILE=habit
+```
+
+`make dev` defaults to the baby profile and uses `backend/database-dev.db`.
+`make dev PROFILE=habit` uses the habit profile and `backend/database-habit-dev.db`.
+`make` cannot accept a custom `--profile` flag here, so profile switching uses `PROFILE=baby|habit`.
 
 ### Database snapshots
 
@@ -80,11 +100,13 @@ Equivalent cron entry:
   - local dev: `backend/database-dev.db`
   - deployed container: `backend/database-prd.db`
 - Production runtime is configured with environment variables:
+  - `APP_PROFILE_CONFIG_PATH`
   - `APP_HOST` / `APP_PORT`
   - `DB_PATH` or `DATABASE_URL`
   - `CORS_ALLOWED_ORIGINS`
   - `GOOGLE_CREDENTIALS_PATH`
   - `FRONTEND_DIST_PATH`
+  - frontend `VITE_*` variables for separate frontend builds
 - For container deployment, the production DB file is mounted in-place at `backend/database-prd.db`, and the Google credentials file is mounted read-only instead of baking it into the image.
 
 ## Tests

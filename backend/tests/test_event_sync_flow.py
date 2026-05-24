@@ -1,6 +1,7 @@
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1083,6 +1084,42 @@ def test_transient_google_delete_failure_keeps_event_hidden_until_retry_succeeds
 def test_unauthenticated_requests_are_rejected(client: TestClient):
     response = client.get("/events")
     assert response.status_code == 401
+
+
+def test_app_config_endpoint_returns_profile_copy_and_templates(client: TestClient):
+    response = client.get("/app-config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile_id"] == "baby"
+    assert payload["app_name"] == "Baby Tracker"
+    assert payload["copy"]["settings_name_label"] == "Baby name"
+    assert payload["button_templates"][0]["id"] == "bottle"
+    assert any(symbol["key"] == "pizza" for symbol in payload["available_symbols"])
+
+
+def test_habit_profile_changes_public_copy_defaults_and_calendar_summary(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    profile_path = Path(__file__).resolve().parents[2] / "app-profiles" / "habit-app-config.yaml"
+    monkeypatch.setenv("APP_PROFILE_CONFIG_PATH", str(profile_path))
+
+    app_config = client.get("/app-config")
+    assert app_config.status_code == 200
+    assert app_config.json()["app_name"] == "Habit Tracker"
+    assert app_config.json()["copy"]["settings_name_label"] == "Habit name"
+
+    root_response = client.get("/")
+    assert root_response.status_code == 200
+    assert root_response.json() == {"message": "Habit Tracker API is running"}
+
+    data = register(client, "habit-user", "secret123", baby_name="Personal")
+    buttons = client.get("/tracker-buttons", headers=auth_headers(data["token"]))
+    assert buttons.status_code == 200
+    assert buttons.json()["buttons"][0]["id"] == "poop"
+    assert buttons.json()["buttons"][0]["title"] == "💩 Poop"
+
+    enabled = client.post("/calendar/enable-sync", headers=auth_headers(data["token"]))
+    assert enabled.status_code == 200
+    assert enabled.json()["google_calendar_summary"] == "Habit Tracker - Personal"
 
 
 def test_root_returns_status_without_frontend_dist(client: TestClient, monkeypatch: pytest.MonkeyPatch):

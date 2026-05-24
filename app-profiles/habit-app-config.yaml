@@ -1,0 +1,432 @@
+profile_id: habit
+app_name: Habit Tracker
+api_title: Habit Tracker API
+calendar_summary_prefix: Habit Tracker
+calendar_description_template: "Habit Tracker calendar for account {account_id} ({username})"
+placeholder_button_label_prefix: Other
+unknown_activity_emoji: "\U0001F3F7\ufe0f"
+copy:
+  auth_badge_label: Tracker sign-in
+  auth_heading: Habit Tracker
+  auth_subheading: Create an account to keep trackers and calendars separated.
+  create_account_label: Create account
+  register_name_placeholder: Habit name (optional)
+  settings_name_label: Habit name
+  settings_name_placeholder: Habit name
+  enable_sync_name_help: Enable sync will save the current habit name and share-email edits automatically first.
+  header_context_with_name: "{tracked_name}'s tracker"
+  header_context_without_name: "{username}'s tracker"
+symbols:
+  - key: bottle-wine
+    label: Bottle
+    emoji: "\U0001F37C"
+    keywords: [milk, feed, drink]
+  - key: utensils
+    label: Food
+    emoji: "\U0001F944"
+    keywords: [meal, eat, snack]
+  - key: baby
+    label: Baby
+    emoji: "\U0001F476"
+    keywords: [kid, child, care]
+  - key: droplet
+    label: Pee
+    emoji: "\U0001F4A7"
+    keywords: [diaper, wet, bathroom]
+  - key: moon
+    label: Sleep
+    emoji: "\U0001F634"
+    keywords: [nap, rest, night]
+  - key: toilet
+    label: Poop
+    emoji: "\U0001F4A9"
+    keywords: [bathroom, digestion, bowel]
+  - key: user-2
+    label: Person
+    emoji: "\U0001F9CD"
+    keywords: [personal, self, profile]
+  - key: milk
+    label: Milk
+    emoji: "\U0001F95B"
+    keywords: [drink, dairy, beverage]
+  - key: help-circle
+    label: Help
+    emoji: "\u2753"
+    keywords: [other, misc, question]
+  - key: briefcase
+    label: Work
+    emoji: "\U0001F4BC"
+    keywords: [office, job, career]
+  - key: dumbbell
+    label: Exercise
+    emoji: "\U0001F3CB\ufe0f"
+    keywords: [workout, gym, fitness]
+  - key: bath
+    label: Bath
+    emoji: "\U0001F6C1"
+    keywords: [wash, clean, shower]
+  - key: car-front
+    label: Travel
+    emoji: "\U0001F697"
+    keywords: [drive, trip, car]
+  - key: shopping-bag
+    label: Errands
+    emoji: "\U0001F6CD\ufe0f"
+    keywords: [shop, store, buy]
+  - key: house
+    label: Home
+    emoji: "\U0001F3E0"
+    keywords: [household, chores, home]
+  - key: book-open
+    label: Learning
+    emoji: "\U0001F4DA"
+    keywords: [reading, school, study]
+  - key: stethoscope
+    label: Health
+    emoji: "\U0001FA7A"
+    keywords: [doctor, medical, care]
+  - key: phone
+    label: Call
+    emoji: "\U0001F4DE"
+    keywords: [phone, talk, contact]
+  - key: music-4
+    label: Music
+    emoji: "\U0001F3B5"
+    keywords: [song, audio, listen]
+  - key: heart
+    label: Love
+    emoji: "\u2764\ufe0f"
+    keywords: [care, family, connection]
+  - key: pill
+    label: Medicine
+    emoji: "\U0001F48A"
+    keywords: [meds, rx, health]
+  - key: timer
+    label: Timer
+    emoji: "\u23F1\ufe0f"
+    keywords: [track, duration, time]
+  - key: paw-print
+    label: Pet
+    emoji: "\U0001F43E"
+    keywords: [pet, animal, walk]
+  - key: bone
+    label: Pet food
+    emoji: "\U0001F9B4"
+    keywords: [dog, pet, treat]
+  - key: cat
+    label: Cat
+    emoji: "\U0001F431"
+    keywords: [pet, animal, feline]
+  - key: dog
+    label: Dog
+    emoji: "\U0001F436"
+    keywords: [pet, animal, canine]
+  - key: fish
+    label: Fish
+    emoji: "\U0001F41F"
+    keywords: [pet, tank, aquarium]
+  - key: bird
+    label: Bird
+    emoji: "\U0001F426"
+    keywords: [pet, animal, avian]
+  - key: rabbit
+    label: Rabbit
+    emoji: "\U0001F430"
+    keywords: [pet, animal, bunny]
+  - key: syringe
+    label: Shot
+    emoji: "\U0001F489"
+    keywords: [vaccine, medical, medicine]
+  - key: thermometer
+    label: Temperature
+    emoji: "\U0001F321\ufe0f"
+    keywords: [fever, check, health]
+  - key: heart-pulse
+    label: Vitals
+    emoji: "\U0001FAC0"
+    keywords: [heart, pulse, health]
+  - key: apple
+    label: Fruit
+    emoji: "\U0001F34E"
+    keywords: [snack, food, nutrition]
+  - key: salad
+    label: Salad
+    emoji: "\U0001F957"
+    keywords: [meal, greens, nutrition]
+  - key: sandwich
+    label: Lunch
+    emoji: "\U0001F96A"
+    keywords: [meal, food, sandwich]
+  - key: carrot
+    label: Veggies
+    emoji: "\U0001F955"
+    keywords: [vegetable, food, nutrition]
+  - key: coffee
+    label: Coffee
+    emoji: "\u2615"
+    keywords: [drink, caffeine, break]
+  - key: cake
+    label: Treat
+    emoji: "\U0001F382"
+    keywords: [dessert, celebration, snack]
+  - key: alarm-clock
+    label: Reminder
+    emoji: "\u23F0"
+    keywords: [alarm, wake, time]
+  - key: calendar-check
+    label: Appointment
+    emoji: "\U0001F5D3\ufe0f"
+    keywords: [calendar, meeting, scheduled]
+  - key: calendar-heart
+    label: Special day
+    emoji: "\U0001F497"
+    keywords: [date, anniversary, celebration]
+  - key: clipboard-list
+    label: Checklist
+    emoji: "\U0001F4CB"
+    keywords: [tasks, todo, notes]
+  - key: sun
+    label: Daytime
+    emoji: "\u2600\ufe0f"
+    keywords: [morning, day, outside]
+  - key: moon-star
+    label: Night
+    emoji: "\U0001F319"
+    keywords: [evening, bedtime, night]
+  - key: bed
+    label: Rest
+    emoji: "\U0001F6CF\ufe0f"
+    keywords: [sleep, nap, bed]
+  - key: plane
+    label: Flight
+    emoji: "\u2708\ufe0f"
+    keywords: [travel, airport, trip]
+  - key: train-front
+    label: Train
+    emoji: "\U0001F686"
+    keywords: [commute, travel, rail]
+  - key: bus
+    label: Bus
+    emoji: "\U0001F68C"
+    keywords: [commute, school, transport]
+  - key: fork-knife
+    label: Meal
+    emoji: "\U0001F37D\ufe0f"
+    keywords: [dinner, restaurant, food]
+  - key: laptop
+    label: Laptop
+    emoji: "\U0001F4BB"
+    keywords: [computer, work, study]
+  - key: notebook-pen
+    label: Notes
+    emoji: "\U0001F4DD"
+    keywords: [journal, write, study]
+  - key: shower-head
+    label: Shower
+    emoji: "\U0001F6BF"
+    keywords: [bath, wash, clean]
+  - key: sparkles
+    label: Self care
+    emoji: "\u2728"
+    keywords: [beauty, care, reset]
+  - key: smile
+    label: Good mood
+    emoji: "\U0001F642"
+    keywords: [happy, mood, emotion]
+  - key: frown
+    label: Low mood
+    emoji: "\u2639\ufe0f"
+    keywords: [sad, mood, emotion]
+  - key: popcorn
+    label: Movie
+    emoji: "\U0001F37F"
+    keywords: [show, movie, fun]
+  - key: gamepad-2
+    label: Gaming
+    emoji: "\U0001F3AE"
+    keywords: [game, play, hobby]
+  - key: leaf
+    label: Outdoors
+    emoji: "\U0001F343"
+    keywords: [walk, nature, outside]
+  - key: pill-bottle
+    label: Meds
+    emoji: "\U0001F48A"
+    keywords: [medicine, rx, dose]
+  - key: bike
+    label: Ride
+    emoji: "\U0001F6B4"
+    keywords: [bike, exercise, commute]
+  - key: tent-tree
+    label: Adventure
+    emoji: "\U0001F3D5\ufe0f"
+    keywords: [camp, trip, outdoors]
+  - key: shopping-cart
+    label: Shopping
+    emoji: "\U0001F6D2"
+    keywords: [groceries, store, errands]
+  - key: wallet
+    label: Money
+    emoji: "\U0001F45B"
+    keywords: [spending, budget, wallet]
+  - key: banknote
+    label: Cash
+    emoji: "\U0001F4B5"
+    keywords: [money, finance, pay]
+  - key: gift
+    label: Gift
+    emoji: "\U0001F381"
+    keywords: [present, birthday, celebration]
+  - key: camera
+    label: Photo
+    emoji: "\U0001F4F7"
+    keywords: [picture, memory, camera]
+  - key: cooking-pot
+    label: Cooking
+    emoji: "\U0001F372"
+    keywords: [kitchen, meal, cook]
+  - key: scan-heart
+    label: Checkup
+    emoji: "\U0001FA7A"
+    keywords: [scan, health, medical]
+  - key: hand-heart
+    label: Care
+    emoji: "\U0001FAF6"
+    keywords: [support, care, love]
+  - key: pizza
+    label: Pizza
+    emoji: "\U0001F355"
+    keywords: [slice, dinner, takeout]
+  - key: soup
+    label: Soup
+    emoji: "\U0001F35C"
+    keywords: [broth, bowl, warm]
+  - key: cookie
+    label: Cookie
+    emoji: "\U0001F36A"
+    keywords: [dessert, sweet, snack]
+  - key: cup-soda
+    label: Soda
+    emoji: "\U0001F964"
+    keywords: [drink, soda, soft drink]
+  - key: beer
+    label: Beer
+    emoji: "\U0001F37A"
+    keywords: [drink, alcohol, social]
+  - key: martini
+    label: Cocktail
+    emoji: "\U0001F378"
+    keywords: [drink, alcohol, bar]
+  - key: wine
+    label: Wine
+    emoji: "\U0001F377"
+    keywords: [drink, alcohol, dinner]
+  - key: utensils-crossed
+    label: Pasta
+    emoji: "\U0001F35D"
+    keywords: [rotini, spaghetti, lasagna]
+  - key: drumstick
+    label: Protein
+    emoji: "\U0001F357"
+    keywords: [meat, meal, protein]
+  - key: beef
+    label: Beef
+    emoji: "\U0001F969"
+    keywords: [meat, protein, dinner]
+  - key: ice-cream-bowl
+    label: Dessert
+    emoji: "\U0001F368"
+    keywords: [ice cream, sweet, treat]
+  - key: footprints
+    label: Walk
+    emoji: "\U0001F463"
+    keywords: [walk, steps, movement]
+  - key: biceps-flexed
+    label: Strength
+    emoji: "\U0001F4AA"
+    keywords: [lift, strength, gym]
+  - key: waves-ladder
+    label: Swim
+    emoji: "\U0001F3CA"
+    keywords: [pool, swim, laps]
+button_templates:
+  - - id: poop
+      label: Poop
+      icon_key: toilet
+      color_key: pink
+      google_color_id: "8"
+    - id: meal
+      label: Meal
+      icon_key: utensils
+      color_key: amber
+      google_color_id: "2"
+    - id: workout
+      label: Workout
+      icon_key: dumbbell
+      color_key: indigo
+      google_color_id: "10"
+    - id: sleep
+      label: Sleep
+      icon_key: moon
+      color_key: blue
+      google_color_id: "9"
+    - id: notes
+      label: Notes
+      icon_key: notebook-pen
+      color_key: slate
+      google_color_id: "3"
+    - id: drink
+      label: Drink
+      icon_key: cup-soda
+      color_key: cyan
+      google_color_id: "5"
+    - id: medicine
+      label: Medicine
+      icon_key: pill-bottle
+      color_key: rose
+      google_color_id: "4"
+    - id: walk
+      label: Walk
+      icon_key: footprints
+      color_key: orange
+      google_color_id: "7"
+  - - id: pizza
+      label: Pizza
+      icon_key: pizza
+      color_key: orange
+      google_color_id: "11"
+    - id: pasta
+      label: Pasta
+      icon_key: utensils-crossed
+      color_key: amber
+      google_color_id: "6"
+    - id: coffee
+      label: Coffee
+      icon_key: coffee
+      color_key: amber
+      google_color_id: "5"
+    - id: mood
+      label: Mood
+      icon_key: smile
+      color_key: rose
+      google_color_id: "3"
+    - id: appointment
+      label: Appointment
+      icon_key: calendar-check
+      color_key: blue
+      google_color_id: "11"
+    - id: bathroom_notes
+      label: Bathroom
+      icon_key: notebook-pen
+      color_key: pink
+      google_color_id: "8"
+    - id: chores
+      label: Chores
+      icon_key: house
+      color_key: slate
+      google_color_id: "1"
+    - id: dessert
+      label: Dessert
+      icon_key: ice-cream-bowl
+      color_key: rose
+      google_color_id: "6"

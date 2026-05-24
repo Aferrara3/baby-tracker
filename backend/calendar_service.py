@@ -1,4 +1,4 @@
-"""Google Calendar integration for Baby Tracker."""
+"""Google Calendar integration for tracker event sync."""
 
 from __future__ import annotations
 
@@ -10,76 +10,40 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from app_profile import get_activity_meta, get_app_profile, get_tracker_button_templates
 from config import CALENDAR_SHARE_ROLE, CALENDAR_TIME_ZONE
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-ACTIVITY_META: dict[str, tuple[str, str]] = {
-    "bottle": ("🍼 Bottle", "5"),
-    "food": ("🥄 Food", "2"),
-    "diaper_pee": ("💧 Diaper (Pee)", "7"),
-    "diaper_poop": ("💩 Diaper (Poop)", "8"),
-    "sleep": ("😴 Sleep", "9"),
-    "breastfeeding": ("🤱 Breastfeeding", "4"),
-    "pump": ("🥛 Pump", "6"),
-    "help": ("❓ Help", "1"),
-    "medicine": ("💊 Medicine", "4"),
-    "temperature": ("🌡️ Temperature", "5"),
-    "bath": ("🛁 Bath", "7"),
-    "outside": ("🍃 Outside", "2"),
-    "tummy_time": ("👶 Tummy Time", "6"),
-    "play": ("🎮 Play", "10"),
-    "doctor": ("🩺 Doctor", "11"),
-    "notes": ("📝 Notes", "3"),
-}
-
-ACTIVITY_TYPE_ALIASES: dict[str, str] = {
-    "diaper1": "diaper_pee",
-    "diaper2": "diaper_poop",
-    "nursing": "breastfeeding",
-    "other": "help",
-}
-
 INSTANT_EVENT_DURATION_MINUTES = 5
 
 
 def normalize_activity_type(activity_type: str) -> str:
-    return ACTIVITY_TYPE_ALIASES.get(activity_type, activity_type)
+    return get_app_profile().type_aliases.get(activity_type, activity_type)
 
 
 def activity_label(activity_type: str) -> str:
     normalized_type = normalize_activity_type(activity_type)
-    return ACTIVITY_META.get(normalized_type, (f"🍼 {normalized_type.title()}", "1"))[0]
+    profile = get_app_profile()
+    return get_activity_meta().get(
+        normalized_type,
+        (f"{profile.unknown_activity_emoji} {normalized_type.replace('_', ' ').title()}", profile.unknown_activity_color_id),
+    )[0]
 
 
-SUMMARY_TYPE_MAP: dict[str, str] = {
-    activity_label(activity_type): activity_type
-    for activity_type in ACTIVITY_META
-}
-SUMMARY_TYPE_MAP.update(
-    {
-        "Bottle": "bottle",
-        "Food": "food",
-        "Diaper (Pee)": "diaper_pee",
-        "Diaper (Poop)": "diaper_poop",
-        "Sleep": "sleep",
-        "Breastfeeding": "breastfeeding",
-        "Pump": "pump",
-        "Help": "help",
-        "Medicine": "medicine",
-        "Temperature": "temperature",
-        "Bath": "bath",
-        "Outside": "outside",
-        "Tummy Time": "tummy_time",
-        "Play": "play",
-        "Doctor": "doctor",
-        "Notes": "notes",
-        "Nursing": "breastfeeding",
-        "Other": "help",
-    }
-)
+def _summary_type_map() -> dict[str, str]:
+    summary_map: dict[str, str] = {}
+    for button in get_tracker_button_templates():
+        activity_type = str(button["id"])
+        label = str(button["label"]).strip()
+        summary_map[activity_label(activity_type)] = activity_type
+        if label:
+            summary_map[label] = activity_type
+    for alias, canonical in get_app_profile().type_aliases.items():
+        summary_map[alias.replace("_", " ").title()] = canonical
+    return summary_map
 
 
 def infer_activity_type_from_summary(summary: Optional[str], fallback: Optional[str] = None) -> str:
@@ -87,7 +51,10 @@ def infer_activity_type_from_summary(summary: Optional[str], fallback: Optional[
         return fallback or "help"
 
     normalized_summary = summary.strip()
-    return normalize_activity_type(SUMMARY_TYPE_MAP.get(normalized_summary, fallback or "help"))
+    return normalize_activity_type(_summary_type_map().get(normalized_summary, fallback or "help"))
+
+
+ACTIVITY_META = get_activity_meta()
 
 
 class CalendarService:
@@ -160,7 +127,14 @@ class CalendarService:
         details: Optional[str] = None,
     ) -> dict:
         normalized_type = normalize_activity_type(event_type)
-        label, color_id = ACTIVITY_META.get(normalized_type, (activity_label(normalized_type), "1"))
+        profile = get_app_profile()
+        label, color_id = get_activity_meta().get(
+            normalized_type,
+            (
+                activity_label(normalized_type),
+                profile.unknown_activity_color_id,
+            ),
+        )
 
         if isinstance(start_time, datetime) and start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)

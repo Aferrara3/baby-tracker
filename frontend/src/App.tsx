@@ -28,19 +28,17 @@ import axios from 'axios';
 import { clsx } from 'clsx';
 
 import ActivityButton from './components/ActivityButton';
+import { FALLBACK_APP_CONFIG, type AppConfig } from './appConfig';
 import Toast from './components/Toast';
 import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 import { THEME_PALETTE_OPTIONS, type ThemePaletteKey } from './theme';
 import {
-  DEFAULT_TRACKER_BUTTONS,
-  DEFAULT_TRACKER_SYMBOLS,
   createTrackerButtonsForPage,
   deriveTrackerButton,
   getTrackerButtonPageCount,
   getTrackerButtonsForPage,
   getTrackerButtonColorClass,
   getTrackerButtonIcon,
-  MAX_TRACKER_BUTTON_PAGES,
   normalizeTrackerButtons,
   sortTrackerButtons,
   TRACKER_BUTTONS_PER_PAGE,
@@ -186,6 +184,8 @@ function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraft
 }
 
 export default function App() {
+  const [appConfig, setAppConfig] = useState<AppConfig>(FALLBACK_APP_CONFIG);
+  const [appConfigLoaded, setAppConfigLoaded] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [account, setAccount] = useState<Account | null>(null);
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) ?? '');
@@ -204,10 +204,10 @@ export default function App() {
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsPalette, setSettingsPalette] = useState<ThemePaletteKey>('default');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
-  const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
-  const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
-  const [availableSymbols, setAvailableSymbols] = useState<TrackerSymbolOption[]>(DEFAULT_TRACKER_SYMBOLS);
-  const [selectedButtonId, setSelectedButtonId] = useState(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+  const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>([]);
+  const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>([]);
+  const [availableSymbols, setAvailableSymbols] = useState<TrackerSymbolOption[]>(FALLBACK_APP_CONFIG.available_symbols);
+  const [selectedButtonId, setSelectedButtonId] = useState('');
   const [symbolSearch, setSymbolSearch] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [isSavingButtons, setIsSavingButtons] = useState(false);
@@ -219,8 +219,8 @@ export default function App() {
   const pendingLogActionRef = useRef<number | null>(null);
   const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
   const paletteAutosaveTimeoutRef = useRef<number | null>(null);
-  const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
-  const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
+  const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload([]));
+  const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload([]));
   const buttonsSaveRequestIdRef = useRef(0);
   const paletteSaveRequestIdRef = useRef(0);
   const toastIdRef = useRef(0);
@@ -233,6 +233,10 @@ export default function App() {
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
+  );
+  const seededDefaultButtons = useMemo(
+    () => normalizeTrackerButtons(getTrackerButtonsForPage(appConfig.button_templates, 0), appConfig.available_symbols),
+    [appConfig.available_symbols, appConfig.button_templates],
   );
   const activities = useMemo<Activity[]>(
     () =>
@@ -284,6 +288,14 @@ export default function App() {
     [settingsButtonsDraft],
   );
   const buttonsHaveUnsavedChanges = serializedSettingsButtonsDraft !== savedButtonsPayloadRef.current;
+  const headerContextText = useMemo(() => {
+    if (!account) {
+      return '';
+    }
+    return account.baby_name
+      ? appConfig.copy.header_context_with_name.replace('{tracked_name}', account.baby_name)
+      : appConfig.copy.header_context_without_name.replace('{username}', account.username);
+  }, [account, appConfig.copy.header_context_with_name, appConfig.copy.header_context_without_name]);
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     toastIdRef.current += 1;
@@ -313,11 +325,11 @@ export default function App() {
     setRunningActivities({});
     setPendingLogs([]);
     setInputValue('');
-    setTrackerButtons(DEFAULT_TRACKER_BUTTONS);
-    setSettingsButtonsDraft(DEFAULT_TRACKER_BUTTONS);
-    setAvailableSymbols(DEFAULT_TRACKER_SYMBOLS);
+    setTrackerButtons(seededDefaultButtons);
+    setSettingsButtonsDraft(seededDefaultButtons);
+    setAvailableSymbols(appConfig.available_symbols);
     setSettingsPalette('default');
-    setSelectedButtonId(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+    setSelectedButtonId(seededDefaultButtons[0]?.id ?? '');
     setSymbolSearch('');
     setIsSavingButtons(false);
     setButtonsSaveError(null);
@@ -325,15 +337,58 @@ export default function App() {
       window.clearTimeout(buttonsAutosaveTimeoutRef.current);
       buttonsAutosaveTimeoutRef.current = null;
     }
-    const defaultButtonsPayload = serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS);
+    const defaultButtonsPayload = serializeTrackerButtonsPayload(seededDefaultButtons);
     latestButtonsPayloadRef.current = defaultButtonsPayload;
     savedButtonsPayloadRef.current = defaultButtonsPayload;
-  }, []);
+  }, [appConfig.available_symbols, seededDefaultButtons]);
 
   const hideInteractionTip = useCallback(() => {
     localStorage.setItem(INTERACTION_TIP_STORAGE_KEY, 'true');
     setShowInteractionTip(false);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchAppConfig = async () => {
+      try {
+        const response = await axios.get<AppConfig>(`${API_BASE}/app-config`);
+        if (!cancelled) {
+          setAppConfig(response.data);
+          setAvailableSymbols(response.data.available_symbols);
+        }
+      } catch (error) {
+        console.error('App config error:', error);
+      } finally {
+        if (!cancelled) {
+          setAppConfigLoaded(true);
+        }
+      }
+    };
+
+    void fetchAppConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    document.title = appConfig.app_name;
+  }, [appConfig.app_name]);
+
+  useEffect(() => {
+    if (account) {
+      return;
+    }
+
+    setTrackerButtons(seededDefaultButtons);
+    setSettingsButtonsDraft(seededDefaultButtons);
+    setAvailableSymbols(appConfig.available_symbols);
+    setSelectedButtonId(seededDefaultButtons[0]?.id ?? '');
+    const defaultButtonsPayload = serializeTrackerButtonsPayload(seededDefaultButtons);
+    latestButtonsPayloadRef.current = defaultButtonsPayload;
+    savedButtonsPayloadRef.current = defaultButtonsPayload;
+  }, [account, appConfig.available_symbols, seededDefaultButtons]);
 
   useEffect(() => {
     const fetchAccount = async () => {
@@ -364,7 +419,7 @@ export default function App() {
         setSettingsButtonsDraft(nextButtons);
         setAvailableSymbols(trackerButtonsResponse.data.available_symbols);
         setTrackerPageIndex(Math.min(getStoredTrackerPageIndex(), getTrackerButtonPageCount(nextButtons) - 1));
-        setSelectedButtonId(nextButtons[0]?.id ?? 'bottle');
+        setSelectedButtonId(nextButtons[0]?.id ?? '');
         setButtonsSaveError(null);
         latestButtonsPayloadRef.current = nextButtonsPayload;
         savedButtonsPayloadRef.current = nextButtonsPayload;
@@ -581,12 +636,18 @@ export default function App() {
     setSettingsButtonsDraft((currentButtons) => {
       const orderedButtons = sortTrackerButtons(currentButtons);
       const currentPageCount = getTrackerButtonPageCount(orderedButtons);
-      if (currentPageCount >= MAX_TRACKER_BUTTON_PAGES) {
+      if (currentPageCount >= appConfig.max_tracker_button_pages) {
         return currentButtons;
       }
 
       nextPageIndex = currentPageCount;
-      nextPageButtons = createTrackerButtonsForPage(currentPageCount, availableSymbols, orderedButtons);
+      nextPageButtons = createTrackerButtonsForPage(
+        currentPageCount,
+        availableSymbols,
+        orderedButtons,
+        appConfig.button_templates,
+        appConfig.placeholder_button_label_prefix,
+      );
 
       return [...orderedButtons, ...nextPageButtons].map((button, index) => ({
         ...button,
@@ -598,7 +659,7 @@ export default function App() {
       setTrackerPageIndex(nextPageIndex);
       setSelectedButtonId(nextPageButtons[0]?.id ?? selectedButtonId);
     }
-  }, [availableSymbols, selectedButtonId]);
+  }, [appConfig.button_templates, appConfig.max_tracker_button_pages, appConfig.placeholder_button_label_prefix, availableSymbols, selectedButtonId]);
 
   const handleDeleteButtonsPage = useCallback(() => {
     if (settingsButtonPageCount <= 1) {
@@ -618,12 +679,12 @@ export default function App() {
   }, [settingsButtonPageCount, trackerPageIndex]);
 
   const handleResetButtonsToDefault = useCallback(() => {
-    const defaultButtons = normalizeTrackerButtons(DEFAULT_TRACKER_BUTTONS, availableSymbols);
+    const defaultButtons = normalizeTrackerButtons(getTrackerButtonsForPage(appConfig.button_templates, 0), availableSymbols);
     setSettingsButtonsDraft(defaultButtons);
     setTrackerPageIndex(0);
-    setSelectedButtonId(defaultButtons[0]?.id ?? 'bottle');
+    setSelectedButtonId(defaultButtons[0]?.id ?? '');
     setButtonsSaveError(null);
-  }, [availableSymbols]);
+  }, [appConfig.button_templates, availableSymbols]);
 
   const handleButtonsDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
@@ -695,7 +756,7 @@ export default function App() {
           if (nextButtons.some((button) => button.id === current)) {
             return current;
           }
-          return nextButtons[0]?.id ?? 'bottle';
+          return nextButtons[0]?.id ?? '';
         });
       }
 
@@ -1148,7 +1209,7 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [activePendingLog, handleInputDismiss, inputValue]);
 
-  if (authLoading) {
+  if (!appConfigLoaded || authLoading) {
     return <div className="app-shell min-h-screen grid place-items-center app-muted">Loading…</div>;
   }
 
@@ -1159,11 +1220,11 @@ export default function App() {
           <div className="space-y-2 text-center">
             <div className="app-accent-soft inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold">
               <ShieldCheck size={16} />
-              Household sign-in
+              {appConfig.copy.auth_badge_label}
             </div>
-            <h1 className="text-3xl font-bold">Baby Tracker</h1>
+            <h1 className="text-3xl font-bold">{appConfig.copy.auth_heading}</h1>
             <p className="app-muted text-sm">
-              Create a household account to keep events and calendars separated.
+              {appConfig.copy.auth_subheading}
             </p>
           </div>
 
@@ -1201,7 +1262,7 @@ export default function App() {
             <input
                 value={registerBabyName}
                 onChange={(event) => setRegisterBabyName(event.target.value)}
-                  placeholder="Baby name (optional)"
+                  placeholder={appConfig.copy.register_name_placeholder}
                   className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                 />
               )}
@@ -1210,7 +1271,7 @@ export default function App() {
                 disabled={isBusy}
                 className="app-primary-button w-full rounded-2xl px-4 py-3 font-semibold disabled:opacity-60"
               >
-                {isBusy ? 'Working…' : authMode === 'register' ? 'Create household' : 'Sign in'}
+                {isBusy ? 'Working…' : authMode === 'register' ? appConfig.copy.create_account_label : 'Sign in'}
               </button>
           </div>
         </div>
@@ -1232,7 +1293,7 @@ export default function App() {
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">Baby Tracker</h1>
+              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">{appConfig.app_name}</h1>
               {displayedTrackerPageCount > 1 && (
                 <div className="inline-flex items-center gap-1">
                   {Array.from({ length: displayedTrackerPageCount }, (_, pageIndex) => (
@@ -1255,7 +1316,7 @@ export default function App() {
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <p className="app-muted text-xs">
-                {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
+                {headerContextText}
               </p>
               <button
                 type="button"
@@ -1337,11 +1398,11 @@ export default function App() {
                 <>
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-sm font-semibold mb-2">Baby name</label>
+                      <label className="block text-sm font-semibold mb-2">{appConfig.copy.settings_name_label}</label>
                       <input
                         value={settingsBabyName}
                         onChange={(event) => setSettingsBabyName(event.target.value)}
-                        placeholder="Baby name"
+                        placeholder={appConfig.copy.settings_name_placeholder}
                         className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
                     </div>
@@ -1355,7 +1416,7 @@ export default function App() {
                         className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
                       <p className="app-muted mt-2 text-xs">
-                        Enable sync will save the current baby name and share-email edits automatically first.
+                        {appConfig.copy.enable_sync_name_help}
                       </p>
                     </div>
                   </div>
@@ -1474,7 +1535,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleAddButtonsPage}
-                        disabled={settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES}
+                        disabled={settingsButtonPageCount >= appConfig.max_tracker_button_pages}
                         className="app-primary-button rounded-xl px-3 py-2 text-sm font-semibold disabled:opacity-60"
                       >
                         Add page

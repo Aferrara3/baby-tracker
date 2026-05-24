@@ -20,6 +20,16 @@ from googleapiclient.errors import HttpError
 from sqlalchemy import text
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
+from app_profile import (
+    MAX_TRACKER_BUTTON_PAGES,
+    TRACKER_BUTTONS_PER_PAGE,
+    get_app_profile,
+    get_profile_symbol_meta,
+    get_profile_symbols,
+    get_seed_tracker_buttons,
+    get_tracker_button_templates,
+    public_app_config,
+)
 from calendar_service import (
     CalendarService,
     activity_label,
@@ -29,6 +39,7 @@ from calendar_service import (
 from config import (
     APP_HOST,
     APP_PORT,
+    APP_PROFILE_CONFIG_PATH,
     CALENDAR_ID,
     CORS_ALLOWED_ORIGINS,
     CREDENTIALS_PATH,
@@ -41,8 +52,6 @@ from config import (
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
-TRACKER_BUTTONS_PER_PAGE = 8
-MAX_TRACKER_BUTTON_PAGES = 3
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
 DEFAULT_COLOR_PALETTE = "default"
 COLOR_PALETTE_KEYS = ("default", "blossom", "meadow", "twilight")
@@ -52,96 +61,7 @@ CALENDAR_SYNC_BASE_RETRY_SECONDS = 30
 CALENDAR_SYNC_MAX_RETRY_SECONDS = 60 * 60
 CALENDAR_SYNC_MAX_BATCH_SIZE = 10
 
-TRACKER_SYMBOLS: list[dict[str, object]] = [
-    {"key": "bottle-wine", "label": "Bottle", "emoji": "🍼", "keywords": ["milk", "feed", "drink"]},
-    {"key": "utensils", "label": "Food", "emoji": "🥄", "keywords": ["meal", "eat", "snack"]},
-    {"key": "baby", "label": "Baby", "emoji": "👶", "keywords": ["kid", "child", "care"]},
-    {"key": "droplet", "label": "Pee", "emoji": "💧", "keywords": ["diaper", "wet", "bathroom"]},
-    {"key": "moon", "label": "Sleep", "emoji": "😴", "keywords": ["nap", "rest", "night"]},
-    {"key": "toilet", "label": "Poop", "emoji": "💩", "keywords": ["diaper", "bathroom", "change"]},
-    {"key": "user-2", "label": "Person", "emoji": "🧍", "keywords": ["personal", "self", "caregiver"]},
-    {"key": "milk", "label": "Milk", "emoji": "🥛", "keywords": ["pump", "drink", "feed"]},
-    {"key": "help-circle", "label": "Help", "emoji": "❓", "keywords": ["other", "misc", "question"]},
-    {"key": "briefcase", "label": "Work", "emoji": "💼", "keywords": ["office", "job", "career"]},
-    {"key": "dumbbell", "label": "Exercise", "emoji": "🏋️", "keywords": ["workout", "gym", "fitness"]},
-    {"key": "bath", "label": "Bath", "emoji": "🛁", "keywords": ["wash", "clean", "shower"]},
-    {"key": "car-front", "label": "Travel", "emoji": "🚗", "keywords": ["drive", "trip", "car"]},
-    {"key": "shopping-bag", "label": "Errands", "emoji": "🛍️", "keywords": ["shop", "store", "buy"]},
-    {"key": "house", "label": "Home", "emoji": "🏠", "keywords": ["household", "chores", "home"]},
-    {"key": "book-open", "label": "Learning", "emoji": "📚", "keywords": ["reading", "school", "study"]},
-    {"key": "stethoscope", "label": "Health", "emoji": "🩺", "keywords": ["doctor", "medical", "care"]},
-    {"key": "phone", "label": "Call", "emoji": "📞", "keywords": ["phone", "talk", "contact"]},
-    {"key": "music-4", "label": "Music", "emoji": "🎵", "keywords": ["song", "audio", "listen"]},
-    {"key": "heart", "label": "Love", "emoji": "❤️", "keywords": ["care", "family", "connection"]},
-    {"key": "pill", "label": "Medicine", "emoji": "💊", "keywords": ["meds", "rx", "health"]},
-    {"key": "timer", "label": "Timer", "emoji": "⏱️", "keywords": ["track", "duration", "time"]},
-    {"key": "paw-print", "label": "Pet", "emoji": "🐾", "keywords": ["pet", "animal", "walk"]},
-    {"key": "bone", "label": "Pet food", "emoji": "🦴", "keywords": ["dog", "pet", "treat"]},
-    {"key": "cat", "label": "Cat", "emoji": "🐱", "keywords": ["pet", "animal", "feline"]},
-    {"key": "dog", "label": "Dog", "emoji": "🐶", "keywords": ["pet", "animal", "canine"]},
-    {"key": "fish", "label": "Fish", "emoji": "🐟", "keywords": ["pet", "tank", "aquarium"]},
-    {"key": "bird", "label": "Bird", "emoji": "🐦", "keywords": ["pet", "animal", "avian"]},
-    {"key": "rabbit", "label": "Rabbit", "emoji": "🐰", "keywords": ["pet", "animal", "bunny"]},
-    {"key": "syringe", "label": "Shot", "emoji": "💉", "keywords": ["vaccine", "medical", "medicine"]},
-    {"key": "thermometer", "label": "Temperature", "emoji": "🌡️", "keywords": ["fever", "check", "health"]},
-    {"key": "heart-pulse", "label": "Vitals", "emoji": "🫀", "keywords": ["heart", "pulse", "health"]},
-    {"key": "apple", "label": "Fruit", "emoji": "🍎", "keywords": ["snack", "food", "nutrition"]},
-    {"key": "salad", "label": "Salad", "emoji": "🥗", "keywords": ["meal", "greens", "nutrition"]},
-    {"key": "sandwich", "label": "Lunch", "emoji": "🥪", "keywords": ["meal", "food", "sandwich"]},
-    {"key": "carrot", "label": "Veggies", "emoji": "🥕", "keywords": ["vegetable", "food", "nutrition"]},
-    {"key": "coffee", "label": "Coffee", "emoji": "☕", "keywords": ["drink", "caffeine", "break"]},
-    {"key": "cake", "label": "Treat", "emoji": "🎂", "keywords": ["dessert", "celebration", "snack"]},
-    {"key": "alarm-clock", "label": "Reminder", "emoji": "⏰", "keywords": ["alarm", "wake", "time"]},
-    {"key": "calendar-check", "label": "Appointment", "emoji": "🗓️", "keywords": ["calendar", "meeting", "scheduled"]},
-    {"key": "calendar-heart", "label": "Special day", "emoji": "💗", "keywords": ["date", "anniversary", "celebration"]},
-    {"key": "clipboard-list", "label": "Checklist", "emoji": "📋", "keywords": ["tasks", "todo", "notes"]},
-    {"key": "sun", "label": "Daytime", "emoji": "☀️", "keywords": ["morning", "day", "outside"]},
-    {"key": "moon-star", "label": "Night", "emoji": "🌙", "keywords": ["evening", "bedtime", "night"]},
-    {"key": "bed", "label": "Rest", "emoji": "🛏️", "keywords": ["sleep", "nap", "bed"]},
-    {"key": "plane", "label": "Flight", "emoji": "✈️", "keywords": ["travel", "airport", "trip"]},
-    {"key": "train-front", "label": "Train", "emoji": "🚆", "keywords": ["commute", "travel", "rail"]},
-    {"key": "bus", "label": "Bus", "emoji": "🚌", "keywords": ["commute", "school", "transport"]},
-    {"key": "fork-knife", "label": "Meal", "emoji": "🍽️", "keywords": ["dinner", "restaurant", "food"]},
-    {"key": "laptop", "label": "Laptop", "emoji": "💻", "keywords": ["computer", "work", "study"]},
-    {"key": "notebook-pen", "label": "Notes", "emoji": "📝", "keywords": ["journal", "write", "study"]},
-    {"key": "shower-head", "label": "Shower", "emoji": "🚿", "keywords": ["bath", "wash", "clean"]},
-    {"key": "sparkles", "label": "Self care", "emoji": "✨", "keywords": ["beauty", "care", "reset"]},
-    {"key": "smile", "label": "Good mood", "emoji": "🙂", "keywords": ["happy", "mood", "emotion"]},
-    {"key": "frown", "label": "Low mood", "emoji": "☹️", "keywords": ["sad", "mood", "emotion"]},
-    {"key": "popcorn", "label": "Movie", "emoji": "🍿", "keywords": ["show", "movie", "fun"]},
-    {"key": "gamepad-2", "label": "Gaming", "emoji": "🎮", "keywords": ["game", "play", "hobby"]},
-    {"key": "leaf", "label": "Outdoors", "emoji": "🍃", "keywords": ["walk", "nature", "outside"]},
-    {"key": "pill-bottle", "label": "Meds", "emoji": "💊", "keywords": ["medicine", "rx", "dose"]},
-    {"key": "bike", "label": "Ride", "emoji": "🚴", "keywords": ["bike", "exercise", "commute"]},
-    {"key": "tent-tree", "label": "Adventure", "emoji": "🏕️", "keywords": ["camp", "trip", "outdoors"]},
-    {"key": "shopping-cart", "label": "Shopping", "emoji": "🛒", "keywords": ["groceries", "store", "errands"]},
-    {"key": "wallet", "label": "Money", "emoji": "👛", "keywords": ["spending", "budget", "wallet"]},
-    {"key": "banknote", "label": "Cash", "emoji": "💵", "keywords": ["money", "finance", "pay"]},
-    {"key": "gift", "label": "Gift", "emoji": "🎁", "keywords": ["present", "birthday", "celebration"]},
-    {"key": "camera", "label": "Photo", "emoji": "📷", "keywords": ["picture", "memory", "camera"]},
-    {"key": "cooking-pot", "label": "Cooking", "emoji": "🍲", "keywords": ["kitchen", "meal", "cook"]},
-    {"key": "scan-heart", "label": "Checkup", "emoji": "🩺", "keywords": ["scan", "health", "medical"]},
-    {"key": "hand-heart", "label": "Care", "emoji": "🫶", "keywords": ["support", "care", "love"]},
-]
-TRACKER_SYMBOL_META = {
-    str(symbol["key"]): {
-        "label": str(symbol["label"]),
-        "emoji": str(symbol["emoji"]),
-        "keywords": [str(keyword) for keyword in symbol["keywords"]],
-    }
-    for symbol in TRACKER_SYMBOLS
-}
 TRACKER_COLOR_KEYS = ("blue", "amber", "cyan", "pink", "indigo", "rose", "orange", "slate")
-DEFAULT_TRACKER_BUTTONS: list[dict[str, object]] = [
-    {"id": "bottle", "label": "Bottle", "icon_key": "bottle-wine", "color_key": "blue", "position": 0},
-    {"id": "food", "label": "Food", "icon_key": "utensils", "color_key": "amber", "position": 1},
-    {"id": "diaper_pee", "label": "Pee", "icon_key": "droplet", "color_key": "cyan", "position": 2},
-    {"id": "diaper_poop", "label": "Poop", "icon_key": "toilet", "color_key": "pink", "position": 3},
-    {"id": "sleep", "label": "Sleep", "icon_key": "moon", "color_key": "indigo", "position": 4},
-    {"id": "breastfeeding", "label": "Nursing", "icon_key": "user-2", "color_key": "rose", "position": 5},
-    {"id": "pump", "label": "Pump", "icon_key": "milk", "color_key": "orange", "position": 6},
-    {"id": "help", "label": "Other", "icon_key": "help-circle", "color_key": "slate", "position": 7},
-]
 
 def _prepare_database() -> None:
     if not DATABASE_URL.startswith("sqlite:///"):
@@ -367,6 +287,32 @@ class TrackerButtonsUpdate(SQLModel):
     buttons: list[TrackerButtonConfig]
 
 
+class AppCopyResponse(SQLModel):
+    auth_badge_label: str
+    auth_heading: str
+    auth_subheading: str
+    create_account_label: str
+    register_name_placeholder: str
+    settings_name_label: str
+    settings_name_placeholder: str
+    enable_sync_name_help: str
+    header_context_with_name: str
+    header_context_without_name: str
+
+
+class AppConfigResponse(SQLModel):
+    model_config = {"populate_by_name": True}
+
+    profile_id: str
+    app_name: str
+    copy_text: AppCopyResponse = Field(alias="copy")
+    available_symbols: list[TrackerSymbolOption]
+    button_templates: list[TrackerButtonResponse]
+    tracker_buttons_per_page: int
+    max_tracker_button_pages: int
+    placeholder_button_label_prefix: str
+
+
 class SessionContext(SQLModel):
     account_id: int
     token_hash: str
@@ -382,8 +328,8 @@ async def _app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="Baby Tracker API",
-    description="API for tracking baby activities",
+    title=get_app_profile().api_title,
+    description=f"API for {get_app_profile().app_name.lower()}",
     version="1.0.0",
     lifespan=_app_lifespan,
 )
@@ -512,12 +458,15 @@ def _resolve_time_zone(time_zone_name: Optional[str]):
 
 
 def _calendar_description(account: Account) -> str:
-    return f"Baby Tracker calendar for account {account.id} ({account.username})"
+    return get_app_profile().calendar_description_template.format(
+        account_id=account.id,
+        username=account.username,
+    )
 
 
 def _calendar_summary(account: Account) -> str:
     label = account.baby_name.strip() if account.baby_name else account.username
-    return f"Baby Tracker - {label}"
+    return f"{get_app_profile().calendar_summary_prefix} - {label}"
 
 
 def _calendar_url(calendar_id: Optional[str]) -> Optional[str]:
@@ -527,7 +476,7 @@ def _calendar_url(calendar_id: Optional[str]) -> Optional[str]:
 
 
 def _tracker_symbol_emoji(icon_key: str) -> str:
-    return TRACKER_SYMBOL_META.get(icon_key, {}).get("emoji", "🏷️")
+    return str(get_profile_symbol_meta().get(icon_key, {}).get("emoji", get_app_profile().unknown_activity_emoji))
 
 
 def _tracker_button_title(label: str, icon_key: str) -> str:
@@ -551,12 +500,12 @@ def _available_tracker_symbols() -> list[TrackerSymbolOption]:
             emoji=str(symbol["emoji"]),
             keywords=[str(keyword) for keyword in symbol["keywords"]],
         )
-        for symbol in TRACKER_SYMBOLS
+        for symbol in get_profile_symbols()
     ]
 
 
 def _default_tracker_buttons() -> list[TrackerButtonConfig]:
-    return [TrackerButtonConfig(**button) for button in DEFAULT_TRACKER_BUTTONS]
+    return [TrackerButtonConfig.model_validate(button) for button in get_seed_tracker_buttons()]
 
 
 def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
@@ -593,7 +542,7 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
             )
 
         icon_key = button.icon_key.strip()
-        if icon_key not in TRACKER_SYMBOL_META:
+        if icon_key not in get_profile_symbol_meta():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Unknown tracker symbol '{button.icon_key}'",
@@ -756,6 +705,10 @@ def _load_account(session: Session, account_id: int) -> Account:
     if not account:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
     return account
+
+
+def _app_running_message() -> str:
+    return f"{get_app_profile().app_name} API is running"
 
 
 def _mark_event_local_only(event: Event) -> Event:
@@ -939,7 +892,7 @@ def _adopt_legacy_events(session: Session, account: Account) -> None:
 
     if CALENDAR_ID and not account.google_calendar_id:
         account.google_calendar_id = CALENDAR_ID
-        account.google_calendar_summary = "Legacy Shared Calendar"
+        account.google_calendar_summary = f"{get_app_profile().app_name} Legacy Calendar"
         account.service_managed_calendar = False
         account.calendar_connected_at = datetime.now(timezone.utc)
         session.add(account)
@@ -1472,12 +1425,29 @@ _ensure_event_columns()
 
 @app.get("/health")
 def read_health():
-    return {"message": "Baby Tracker API is running"}
+    return {"message": _app_running_message()}
+
+
+@app.get("/app-config", response_model=AppConfigResponse)
+def read_app_config():
+    payload = public_app_config()
+    return AppConfigResponse(
+        profile_id=str(payload["profile_id"]),
+        app_name=str(payload["app_name"]),
+        copy_text=AppCopyResponse.model_validate(payload["copy"]),
+        available_symbols=[TrackerSymbolOption.model_validate(symbol) for symbol in payload["available_symbols"]],
+        button_templates=[
+            _tracker_button_response(TrackerButtonConfig.model_validate(button)) for button in payload["button_templates"]
+        ],
+        tracker_buttons_per_page=int(payload["tracker_buttons_per_page"]),
+        max_tracker_button_pages=int(payload["max_tracker_button_pages"]),
+        placeholder_button_label_prefix=str(payload["placeholder_button_label_prefix"]),
+    )
 
 
 @app.get("/")
 def read_root():
-    return _frontend_file_response("index.html") or {"message": "Baby Tracker API is running"}
+    return _frontend_file_response("index.html") or {"message": _app_running_message()}
 
 
 @app.post("/auth/register", response_model=AuthResponse)
