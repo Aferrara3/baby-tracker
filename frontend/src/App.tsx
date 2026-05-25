@@ -1,4 +1,4 @@
-import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DndContext,
   PointerSensor,
@@ -15,34 +15,37 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
+  ImagePlus,
   HelpCircle,
   LogOut,
+  Search,
   Send,
   Settings,
   ShieldCheck,
+  Trash2,
   Undo2,
   X,
-  type LucideIcon,
 } from 'lucide-react';
 import axios from 'axios';
 import { clsx } from 'clsx';
 
 import ActivityButton from './components/ActivityButton';
+import TrackerSymbolIcon from './components/TrackerSymbolIcon';
+import { FALLBACK_APP_CONFIG, type AppConfig } from './appConfig';
 import Toast from './components/Toast';
 import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 import { THEME_PALETTE_OPTIONS, type ThemePaletteKey } from './theme';
 import {
-  DEFAULT_TRACKER_BUTTONS,
-  DEFAULT_TRACKER_SYMBOLS,
   createTrackerButtonsForPage,
   deriveTrackerButton,
   getTrackerButtonPageCount,
   getTrackerButtonsForPage,
   getTrackerButtonColorClass,
-  getTrackerButtonIcon,
-  MAX_TRACKER_BUTTON_PAGES,
+  getTrackerSymbol,
+  isValidEmojiValue,
   normalizeTrackerButtons,
   sortTrackerButtons,
+  TRACKER_BUTTON_COLOR_OPTIONS,
   TRACKER_BUTTONS_PER_PAGE,
   type TrackerButtonConfig,
   type TrackerButtonsResponse,
@@ -57,12 +60,26 @@ const NOTE_SHEET_AUTO_DISMISS_MS = 5000;
 const TRACKER_BUTTON_AUTOSAVE_DELAY_MS = 600;
 const PALETTE_AUTOSAVE_DELAY_MS = 500;
 const BROWSER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const CUSTOM_ICON_MIN_ZOOM = 0.75;
+const CUSTOM_ICON_MAX_ZOOM = 2.5;
+const CUSTOM_ICON_ZOOM_STEP = 0.15;
 
 interface Activity {
   id: string;
-  icon: LucideIcon;
+  symbol?: TrackerSymbolOption;
   label: string;
   colorClass: string;
+}
+
+interface CustomIconDraft {
+  label: string;
+  emoji: string;
+  keywords: string;
+  isPublic: boolean;
+  sourceFile: File | null;
+  preparedFile: File | null;
+  previewUrl: string | null;
+  zoom: number;
 }
 
 interface ToastItem {
@@ -123,6 +140,7 @@ function buildTrackerButtonsPayload(buttons: TrackerButtonConfig[]) {
       icon_key: button.icon_key,
       color_key: button.color_key,
       position,
+      emoji_override: button.emoji_override?.trim() || null,
     })),
   };
 }
@@ -147,15 +165,129 @@ function parseEmails(input: string): string[] {
   );
 }
 
+function symbolSourceLabel(symbol: TrackerSymbolOption): string {
+  if (symbol.icon_kind === 'custom') {
+    if (symbol.can_delete) {
+      return symbol.is_public ? 'Your public icon' : 'Your icon';
+    }
+    return 'Community';
+  }
+  return 'Lucide';
+}
+
+async function prepareCustomIconFile(file: File, zoom: number): Promise<{ preparedFile: File; previewUrl: string }> {
+  const isSupportedType = file.type === 'image/png' || file.type === 'image/svg+xml' || /\.png$|\.svg$/i.test(file.name);
+  if (!isSupportedType) {
+    throw new Error('Custom icons must be PNG or SVG');
+  }
+
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const nextImage = new Image();
+      nextImage.onload = () => resolve(nextImage);
+      nextImage.onerror = () => reject(new Error('Could not read that image file'));
+      nextImage.src = imageUrl;
+    });
+
+    const canvas = document.createElement('canvas');
+    const size = 256;
+    const padding = 16;
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Could not prepare that image');
+    }
+
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = image.naturalWidth;
+    sourceCanvas.height = image.naturalHeight;
+    const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+    if (!sourceContext) {
+      throw new Error('Could not prepare that image');
+    }
+    sourceContext.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    sourceContext.drawImage(image, 0, 0);
+
+    const sourceImageData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    const { data } = sourceImageData;
+    let minX = sourceCanvas.width;
+    let minY = sourceCanvas.height;
+    let maxX = -1;
+    let maxY = -1;
+    const alphaThreshold = 8;
+
+    for (let y = 0; y < sourceCanvas.height; y += 1) {
+      for (let x = 0; x < sourceCanvas.width; x += 1) {
+        const alpha = data[(y * sourceCanvas.width + x) * 4 + 3];
+        if (alpha <= alphaThreshold) {
+          continue;
+        }
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    const cropX = maxX >= minX ? minX : 0;
+    const cropY = maxY >= minY ? minY : 0;
+    const cropWidth = maxX >= minX ? maxX - minX + 1 : sourceCanvas.width;
+    const cropHeight = maxY >= minY ? maxY - minY + 1 : sourceCanvas.height;
+
+    context.clearRect(0, 0, size, size);
+    const maxSize = size - padding * 2;
+    const scale = Math.min(maxSize / cropWidth, maxSize / cropHeight) * zoom;
+    const drawWidth = cropWidth * scale;
+    const drawHeight = cropHeight * scale;
+    const drawX = (size - drawWidth) / 2;
+    const drawY = (size - drawHeight) / 2;
+    context.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, drawX, drawY, drawWidth, drawHeight);
+
+    const normalizedImage = context.getImageData(0, 0, canvas.width, canvas.height);
+    for (let index = 0; index < normalizedImage.data.length; index += 4) {
+      const alpha = normalizedImage.data[index + 3];
+      if (alpha <= alphaThreshold) {
+        continue;
+      }
+      normalizedImage.data[index] = 255;
+      normalizedImage.data[index + 1] = 255;
+      normalizedImage.data[index + 2] = 255;
+    }
+    context.putImageData(normalizedImage, 0, 0);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((nextBlob) => {
+        if (nextBlob) {
+          resolve(nextBlob);
+          return;
+        }
+        reject(new Error('Could not export the prepared icon'));
+      }, 'image/png');
+    });
+
+    const preparedFile = new File([blob], `${file.name.replace(/\.[^.]+$/, '') || 'custom-icon'}.png`, {
+      type: 'image/png',
+    });
+    return {
+      preparedFile,
+      previewUrl: URL.createObjectURL(blob),
+    };
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
 interface SortableDraftButtonCardProps {
   button: TrackerButtonConfig;
+  symbol?: TrackerSymbolOption;
   isSelected: boolean;
   onSelect: () => void;
 }
 
-function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraftButtonCardProps) {
+function SortableDraftButtonCard({ button, symbol, isSelected, onSelect }: SortableDraftButtonCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: button.id });
-  const iconComponent = getTrackerButtonIcon(button.icon_key);
 
   return (
     <button
@@ -176,7 +308,7 @@ function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraft
       )}
     >
       <div className={clsx('flex h-[4.5rem] w-[4.5rem] items-center justify-center rounded-2xl shadow-md md:h-24 md:w-24', getTrackerButtonColorClass(button.color_key))}>
-        {createElement(iconComponent, { size: 30, className: 'text-white', strokeWidth: 2.4 })}
+        <TrackerSymbolIcon symbol={symbol} iconKey={button.icon_key} size={30} className="text-white" strokeWidth={2.4} />
       </div>
       <p className="app-text max-w-full truncate text-[11px] font-bold uppercase tracking-wide md:text-sm">
         {button.label.trim() || 'Untitled'}
@@ -186,6 +318,8 @@ function SortableDraftButtonCard({ button, isSelected, onSelect }: SortableDraft
 }
 
 export default function App() {
+  const [appConfig, setAppConfig] = useState<AppConfig>(FALLBACK_APP_CONFIG);
+  const [appConfigLoaded, setAppConfigLoaded] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [account, setAccount] = useState<Account | null>(null);
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) ?? '');
@@ -204,11 +338,24 @@ export default function App() {
   const [settingsBabyName, setSettingsBabyName] = useState('');
   const [settingsPalette, setSettingsPalette] = useState<ThemePaletteKey>('default');
   const [settingsShareEmails, setSettingsShareEmails] = useState('');
-  const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
-  const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>(DEFAULT_TRACKER_BUTTONS);
-  const [availableSymbols, setAvailableSymbols] = useState<TrackerSymbolOption[]>(DEFAULT_TRACKER_SYMBOLS);
-  const [selectedButtonId, setSelectedButtonId] = useState(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+  const [trackerButtons, setTrackerButtons] = useState<TrackerButtonConfig[]>([]);
+  const [settingsButtonsDraft, setSettingsButtonsDraft] = useState<TrackerButtonConfig[]>([]);
+  const [availableSymbols, setAvailableSymbols] = useState<TrackerSymbolOption[]>(FALLBACK_APP_CONFIG.available_symbols);
+  const [selectedButtonId, setSelectedButtonId] = useState('');
   const [symbolSearch, setSymbolSearch] = useState('');
+  const [customIconDraft, setCustomIconDraft] = useState<CustomIconDraft>({
+    label: '',
+    emoji: '',
+    keywords: '',
+    isPublic: false,
+    sourceFile: null,
+    preparedFile: null,
+    previewUrl: null,
+    zoom: 1,
+  });
+  const [isCreatingCustomIcon, setIsCreatingCustomIcon] = useState(false);
+  const [isDeletingCustomIcon, setIsDeletingCustomIcon] = useState(false);
+  const [customIconError, setCustomIconError] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isSavingButtons, setIsSavingButtons] = useState(false);
   const [buttonsSaveError, setButtonsSaveError] = useState<string | null>(null);
@@ -219,8 +366,8 @@ export default function App() {
   const pendingLogActionRef = useRef<number | null>(null);
   const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
   const paletteAutosaveTimeoutRef = useRef<number | null>(null);
-  const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
-  const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS));
+  const latestButtonsPayloadRef = useRef(serializeTrackerButtonsPayload([]));
+  const savedButtonsPayloadRef = useRef(serializeTrackerButtonsPayload([]));
   const buttonsSaveRequestIdRef = useRef(0);
   const paletteSaveRequestIdRef = useRef(0);
   const toastIdRef = useRef(0);
@@ -234,15 +381,19 @@ export default function App() {
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
   );
+  const seededDefaultButtons = useMemo(
+    () => normalizeTrackerButtons(getTrackerButtonsForPage(appConfig.button_templates, 0), appConfig.available_symbols),
+    [appConfig.available_symbols, appConfig.button_templates],
+  );
   const activities = useMemo<Activity[]>(
     () =>
       sortTrackerButtons(trackerButtons).map((button) => ({
         id: button.id,
-        icon: getTrackerButtonIcon(button.icon_key),
+        symbol: getTrackerSymbol(availableSymbols, button.icon_key),
         label: button.label,
         colorClass: getTrackerButtonColorClass(button.color_key),
       })),
-    [trackerButtons],
+    [availableSymbols, trackerButtons],
   );
   const trackerPageCount = useMemo(() => getTrackerButtonPageCount(trackerButtons), [trackerButtons]);
   const visibleActivities = useMemo(
@@ -264,19 +415,66 @@ export default function App() {
   const displayedTrackerPageCount = Math.max(trackerPageCount, settingsButtonPageCount);
   const selectedDraftButton =
     currentDraftButtonsPage.find((button) => button.id === selectedButtonId) ?? currentDraftButtonsPage[0] ?? null;
+  const selectedSymbol = useMemo(
+    () => (selectedDraftButton ? getTrackerSymbol(availableSymbols, selectedDraftButton.icon_key) ?? null : null),
+    [availableSymbols, selectedDraftButton],
+  );
   const filteredSymbols = useMemo(() => {
     const query = symbolSearch.trim().toLowerCase();
     if (!query) {
-      return availableSymbols;
+      return availableSymbols.slice(0, 80);
     }
+    const queryTokens = query.split(/\s+/).filter(Boolean);
 
-    return availableSymbols.filter((symbol) =>
-      [symbol.label, symbol.key, symbol.emoji, ...symbol.keywords]
-        .join(' ')
-        .toLowerCase()
-        .includes(query),
-    );
+    return [...availableSymbols]
+      .map((symbol) => {
+        const haystack = [symbol.label, symbol.key, symbol.category ?? '', symbol.emoji, ...symbol.keywords]
+          .join(' ')
+          .toLowerCase();
+        let score = 0;
+        if (symbol.label.toLowerCase() === query) score += 120;
+        if (symbol.key.toLowerCase() === query) score += 100;
+        if (symbol.label.toLowerCase().startsWith(query)) score += 48;
+        if (symbol.key.toLowerCase().startsWith(query)) score += 36;
+        if ((symbol.category ?? '').toLowerCase() === query) score += 28;
+        for (const token of queryTokens) {
+          if (symbol.label.toLowerCase().includes(token)) score += 16;
+          if (symbol.key.toLowerCase().includes(token)) score += 12;
+          if ((symbol.category ?? '').toLowerCase().includes(token)) score += 10;
+          if (symbol.keywords.some((keyword) => keyword.toLowerCase().includes(token))) score += 8;
+        }
+        if (symbol.icon_kind === 'custom') score += 2;
+        if (score === 0 && !haystack.includes(query)) {
+          return null;
+        }
+        return { symbol, score };
+      })
+      .filter((entry): entry is { symbol: TrackerSymbolOption; score: number } => entry !== null)
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return left.symbol.label.localeCompare(right.symbol.label);
+      })
+      .slice(0, 80)
+      .map((entry) => entry.symbol);
   }, [availableSymbols, symbolSearch]);
+  const filteredSymbolGroups = useMemo(() => {
+    const groups = new Map<string, { title: string; symbols: TrackerSymbolOption[] }>();
+    for (const symbol of filteredSymbols) {
+      const title =
+        symbol.icon_kind === 'custom'
+          ? symbolSourceLabel(symbol)
+          : `Lucide${symbol.category ? ` > ${symbol.category}` : ''}`;
+      const existing = groups.get(title);
+      if (existing) {
+        existing.symbols.push(symbol);
+      } else {
+        groups.set(title, { title, symbols: [symbol] });
+      }
+    }
+    return [...groups.values()];
+  }, [filteredSymbols]);
   const activePendingLog = pendingLogs[0] ?? null;
   const pendingActivityLabel = activities.find((activity) => activity.id === activePendingLog?.activityId)?.label ?? 'event';
   const serializedSettingsButtonsDraft = useMemo(
@@ -284,6 +482,18 @@ export default function App() {
     [settingsButtonsDraft],
   );
   const buttonsHaveUnsavedChanges = serializedSettingsButtonsDraft !== savedButtonsPayloadRef.current;
+  const invalidButtonEmojiOverride = useMemo(
+    () => settingsButtonsDraft.find((button) => button.emoji_override && !isValidEmojiValue(button.emoji_override)),
+    [settingsButtonsDraft],
+  );
+  const headerContextText = useMemo(() => {
+    if (!account) {
+      return '';
+    }
+    return account.baby_name
+      ? appConfig.copy.header_context_with_name.replace('{tracked_name}', account.baby_name)
+      : appConfig.copy.header_context_without_name.replace('{username}', account.username);
+  }, [account, appConfig.copy.header_context_with_name, appConfig.copy.header_context_without_name]);
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     toastIdRef.current += 1;
@@ -293,6 +503,12 @@ export default function App() {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3000);
   }, []);
+
+  useEffect(() => () => {
+    if (customIconDraft.previewUrl) {
+      URL.revokeObjectURL(customIconDraft.previewUrl);
+    }
+  }, [customIconDraft.previewUrl]);
 
   const persistAuth = (nextToken: string, nextAccount: Account) => {
     localStorage.setItem(TOKEN_STORAGE_KEY, nextToken);
@@ -313,11 +529,11 @@ export default function App() {
     setRunningActivities({});
     setPendingLogs([]);
     setInputValue('');
-    setTrackerButtons(DEFAULT_TRACKER_BUTTONS);
-    setSettingsButtonsDraft(DEFAULT_TRACKER_BUTTONS);
-    setAvailableSymbols(DEFAULT_TRACKER_SYMBOLS);
+    setTrackerButtons(seededDefaultButtons);
+    setSettingsButtonsDraft(seededDefaultButtons);
+    setAvailableSymbols(appConfig.available_symbols);
     setSettingsPalette('default');
-    setSelectedButtonId(DEFAULT_TRACKER_BUTTONS[0]?.id ?? 'bottle');
+    setSelectedButtonId(seededDefaultButtons[0]?.id ?? '');
     setSymbolSearch('');
     setIsSavingButtons(false);
     setButtonsSaveError(null);
@@ -325,15 +541,58 @@ export default function App() {
       window.clearTimeout(buttonsAutosaveTimeoutRef.current);
       buttonsAutosaveTimeoutRef.current = null;
     }
-    const defaultButtonsPayload = serializeTrackerButtonsPayload(DEFAULT_TRACKER_BUTTONS);
+    const defaultButtonsPayload = serializeTrackerButtonsPayload(seededDefaultButtons);
     latestButtonsPayloadRef.current = defaultButtonsPayload;
     savedButtonsPayloadRef.current = defaultButtonsPayload;
-  }, []);
+  }, [appConfig.available_symbols, seededDefaultButtons]);
 
   const hideInteractionTip = useCallback(() => {
     localStorage.setItem(INTERACTION_TIP_STORAGE_KEY, 'true');
     setShowInteractionTip(false);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchAppConfig = async () => {
+      try {
+        const response = await axios.get<AppConfig>(`${API_BASE}/app-config`);
+        if (!cancelled) {
+          setAppConfig(response.data);
+          setAvailableSymbols(response.data.available_symbols);
+        }
+      } catch (error) {
+        console.error('App config error:', error);
+      } finally {
+        if (!cancelled) {
+          setAppConfigLoaded(true);
+        }
+      }
+    };
+
+    void fetchAppConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    document.title = appConfig.app_name;
+  }, [appConfig.app_name]);
+
+  useEffect(() => {
+    if (account) {
+      return;
+    }
+
+    setTrackerButtons(seededDefaultButtons);
+    setSettingsButtonsDraft(seededDefaultButtons);
+    setAvailableSymbols(appConfig.available_symbols);
+    setSelectedButtonId(seededDefaultButtons[0]?.id ?? '');
+    const defaultButtonsPayload = serializeTrackerButtonsPayload(seededDefaultButtons);
+    latestButtonsPayloadRef.current = defaultButtonsPayload;
+    savedButtonsPayloadRef.current = defaultButtonsPayload;
+  }, [account, appConfig.available_symbols, seededDefaultButtons]);
 
   useEffect(() => {
     const fetchAccount = async () => {
@@ -364,7 +623,7 @@ export default function App() {
         setSettingsButtonsDraft(nextButtons);
         setAvailableSymbols(trackerButtonsResponse.data.available_symbols);
         setTrackerPageIndex(Math.min(getStoredTrackerPageIndex(), getTrackerButtonPageCount(nextButtons) - 1));
-        setSelectedButtonId(nextButtons[0]?.id ?? 'bottle');
+        setSelectedButtonId(nextButtons[0]?.id ?? '');
         setButtonsSaveError(null);
         latestButtonsPayloadRef.current = nextButtonsPayload;
         savedButtonsPayloadRef.current = nextButtonsPayload;
@@ -567,6 +826,7 @@ export default function App() {
             icon_key: changes.icon_key ?? button.icon_key,
             color_key: changes.color_key ?? button.color_key,
             position: button.position,
+            emoji_override: changes.emoji_override ?? button.emoji_override,
           },
           availableSymbols,
         );
@@ -581,12 +841,23 @@ export default function App() {
     setSettingsButtonsDraft((currentButtons) => {
       const orderedButtons = sortTrackerButtons(currentButtons);
       const currentPageCount = getTrackerButtonPageCount(orderedButtons);
-      if (currentPageCount >= MAX_TRACKER_BUTTON_PAGES) {
+      if (currentPageCount >= appConfig.max_tracker_button_pages) {
         return currentButtons;
       }
 
       nextPageIndex = currentPageCount;
-      nextPageButtons = createTrackerButtonsForPage(currentPageCount, availableSymbols, orderedButtons);
+      const templateButtons = getTrackerButtonsForPage(appConfig.button_templates, currentPageCount);
+      if (templateButtons.length === TRACKER_BUTTONS_PER_PAGE) {
+        nextPageButtons = normalizeTrackerButtons(templateButtons, availableSymbols).map((button, index) => ({
+          ...button,
+          position: currentPageCount * TRACKER_BUTTONS_PER_PAGE + index,
+        }));
+      } else {
+        nextPageButtons = getTrackerButtonsForPage(
+          createTrackerButtonsForPage(orderedButtons, currentPageCount, appConfig.placeholder_button_label_prefix),
+          currentPageCount,
+        ).map((button) => deriveTrackerButton(button, availableSymbols));
+      }
 
       return [...orderedButtons, ...nextPageButtons].map((button, index) => ({
         ...button,
@@ -598,7 +869,7 @@ export default function App() {
       setTrackerPageIndex(nextPageIndex);
       setSelectedButtonId(nextPageButtons[0]?.id ?? selectedButtonId);
     }
-  }, [availableSymbols, selectedButtonId]);
+  }, [appConfig.max_tracker_button_pages, appConfig.placeholder_button_label_prefix, availableSymbols, selectedButtonId]);
 
   const handleDeleteButtonsPage = useCallback(() => {
     if (settingsButtonPageCount <= 1) {
@@ -618,12 +889,163 @@ export default function App() {
   }, [settingsButtonPageCount, trackerPageIndex]);
 
   const handleResetButtonsToDefault = useCallback(() => {
-    const defaultButtons = normalizeTrackerButtons(DEFAULT_TRACKER_BUTTONS, availableSymbols);
+    const defaultButtons = normalizeTrackerButtons(getTrackerButtonsForPage(appConfig.button_templates, 0), availableSymbols);
     setSettingsButtonsDraft(defaultButtons);
     setTrackerPageIndex(0);
-    setSelectedButtonId(defaultButtons[0]?.id ?? 'bottle');
+    setSelectedButtonId(defaultButtons[0]?.id ?? '');
     setButtonsSaveError(null);
-  }, [availableSymbols]);
+  }, [appConfig.button_templates, availableSymbols]);
+
+  const handleCreateCustomIcon = useCallback(async () => {
+    if (!authHeaders) {
+      return;
+    }
+    if (!customIconDraft.preparedFile) {
+      setCustomIconError('Choose a PNG or SVG file first');
+      return;
+    }
+    if (!isValidEmojiValue(customIconDraft.emoji)) {
+      setCustomIconError('Choose a real emoji for calendar titles');
+      return;
+    }
+
+    setIsCreatingCustomIcon(true);
+    setCustomIconError(null);
+    try {
+      const formData = new FormData();
+      formData.append('label', customIconDraft.label.trim() || customIconDraft.preparedFile.name.replace(/\.[^.]+$/, ''));
+      formData.append('emoji', customIconDraft.emoji.trim());
+      formData.append('keywords', customIconDraft.keywords.trim());
+      formData.append('is_public', String(customIconDraft.isPublic));
+      formData.append('asset', customIconDraft.preparedFile);
+
+      const response = await axios.post<TrackerSymbolOption>(`${API_BASE}/custom-icons`, formData, {
+        headers: authHeaders,
+      });
+      setAvailableSymbols((prev) => [response.data, ...prev.filter((symbol) => symbol.key !== response.data.key)]);
+      if (selectedDraftButton) {
+        updateDraftButton(selectedDraftButton.id, { icon_key: response.data.key });
+      }
+      setSymbolSearch(response.data.label);
+      setCustomIconDraft((current) => {
+        if (current.previewUrl) {
+          URL.revokeObjectURL(current.previewUrl);
+        }
+        return {
+          label: '',
+          emoji: '',
+          keywords: '',
+          isPublic: false,
+          sourceFile: null,
+          preparedFile: null,
+          previewUrl: null,
+          zoom: 1,
+        };
+      });
+      addToast('Custom icon added', 'success');
+    } catch (error) {
+      const errorDetail = getApiErrorDetail(error);
+      setCustomIconError(errorDetail ?? 'Failed to create custom icon');
+      addToast(errorDetail ?? 'Failed to create custom icon', 'error');
+      console.error('Custom icon error:', error);
+    } finally {
+      setIsCreatingCustomIcon(false);
+    }
+  }, [addToast, authHeaders, customIconDraft, selectedDraftButton, updateDraftButton]);
+
+  const handleCustomIconFileChange = useCallback(async (file: File | null) => {
+    if (!file) {
+      setCustomIconDraft((current) => {
+        if (current.previewUrl) {
+          URL.revokeObjectURL(current.previewUrl);
+        }
+        return { ...current, sourceFile: null, preparedFile: null, previewUrl: null, zoom: 1 };
+      });
+      return;
+    }
+
+    try {
+      const { preparedFile, previewUrl } = await prepareCustomIconFile(file, 1);
+      setCustomIconDraft((current) => {
+        if (current.previewUrl) {
+          URL.revokeObjectURL(current.previewUrl);
+        }
+        return { ...current, sourceFile: file, preparedFile, previewUrl, zoom: 1 };
+      });
+      setCustomIconError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to prepare icon';
+      setCustomIconError(message);
+      setCustomIconDraft((current) => {
+        if (current.previewUrl) {
+          URL.revokeObjectURL(current.previewUrl);
+        }
+        return { ...current, sourceFile: null, preparedFile: null, previewUrl: null, zoom: 1 };
+      });
+    }
+  }, []);
+
+  const handleCustomIconZoom = useCallback(async (direction: -1 | 1) => {
+    if (!customIconDraft.sourceFile) {
+      return;
+    }
+    const nextZoom = Math.max(
+      CUSTOM_ICON_MIN_ZOOM,
+      Math.min(
+        CUSTOM_ICON_MAX_ZOOM,
+        Number((customIconDraft.zoom + direction * CUSTOM_ICON_ZOOM_STEP).toFixed(2)),
+      ),
+    );
+    if (nextZoom === customIconDraft.zoom) {
+      return;
+    }
+
+    try {
+      const { preparedFile, previewUrl } = await prepareCustomIconFile(customIconDraft.sourceFile, nextZoom);
+      setCustomIconDraft((current) => {
+        if (current.previewUrl) {
+          URL.revokeObjectURL(current.previewUrl);
+        }
+        return {
+          ...current,
+          preparedFile,
+          previewUrl,
+          zoom: nextZoom,
+        };
+      });
+      setCustomIconError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update icon zoom';
+      setCustomIconError(message);
+    }
+  }, [customIconDraft.sourceFile, customIconDraft.zoom]);
+
+  const handleDeleteSelectedCustomIcon = useCallback(async () => {
+    if (!authHeaders || !selectedSymbol?.can_delete) {
+      return;
+    }
+    const customIconId = selectedSymbol.key.startsWith('custom:') ? Number(selectedSymbol.key.replace('custom:', '')) : NaN;
+    if (!Number.isFinite(customIconId)) {
+      return;
+    }
+
+    setIsDeletingCustomIcon(true);
+    setCustomIconError(null);
+    try {
+      await axios.delete(`${API_BASE}/custom-icons/${customIconId}`, { headers: authHeaders });
+      setAvailableSymbols((prev) => prev.filter((symbol) => symbol.key !== selectedSymbol.key));
+      if (selectedDraftButton) {
+        updateDraftButton(selectedDraftButton.id, { icon_key: 'help-circle', emoji_override: null });
+      }
+      addToast('Custom icon deleted', 'success');
+    } catch (error) {
+      const errorDetail = getApiErrorDetail(error);
+      setCustomIconError(errorDetail ?? 'Failed to delete custom icon');
+      addToast(errorDetail ?? 'Failed to delete custom icon', 'error');
+    } finally {
+      setIsDeletingCustomIcon(false);
+    }
+  }, [addToast, authHeaders, selectedDraftButton, selectedSymbol, updateDraftButton]);
 
   const handleButtonsDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
@@ -695,7 +1117,7 @@ export default function App() {
           if (nextButtons.some((button) => button.id === current)) {
             return current;
           }
-          return nextButtons[0]?.id ?? 'bottle';
+          return nextButtons[0]?.id ?? '';
         });
       }
 
@@ -736,6 +1158,15 @@ export default function App() {
       return undefined;
     }
 
+    if (invalidButtonEmojiOverride) {
+      setButtonsSaveError(`Choose a valid emoji for ${invalidButtonEmojiOverride.label.trim() || 'that button'}`);
+      if (buttonsAutosaveTimeoutRef.current !== null) {
+        window.clearTimeout(buttonsAutosaveTimeoutRef.current);
+        buttonsAutosaveTimeoutRef.current = null;
+      }
+      return undefined;
+    }
+
     if (buttonsAutosaveTimeoutRef.current !== null) {
       window.clearTimeout(buttonsAutosaveTimeoutRef.current);
     }
@@ -751,7 +1182,7 @@ export default function App() {
         buttonsAutosaveTimeoutRef.current = null;
       }
     };
-  }, [authHeaders, handleSaveButtons, serializedSettingsButtonsDraft, settingsButtonsDraft]);
+  }, [authHeaders, handleSaveButtons, invalidButtonEmojiOverride, serializedSettingsButtonsDraft, settingsButtonsDraft]);
 
   const handleUndoPendingLog = useCallback(async () => {
     if (!activePendingLog || !authHeaders) {
@@ -1148,7 +1579,7 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [activePendingLog, handleInputDismiss, inputValue]);
 
-  if (authLoading) {
+  if (!appConfigLoaded || authLoading) {
     return <div className="app-shell min-h-screen grid place-items-center app-muted">Loading…</div>;
   }
 
@@ -1159,11 +1590,11 @@ export default function App() {
           <div className="space-y-2 text-center">
             <div className="app-accent-soft inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold">
               <ShieldCheck size={16} />
-              Household sign-in
+              {appConfig.copy.auth_badge_label}
             </div>
-            <h1 className="text-3xl font-bold">Baby Tracker</h1>
+            <h1 className="text-3xl font-bold">{appConfig.copy.auth_heading}</h1>
             <p className="app-muted text-sm">
-              Create a household account to keep events and calendars separated.
+              {appConfig.copy.auth_subheading}
             </p>
           </div>
 
@@ -1201,7 +1632,7 @@ export default function App() {
             <input
                 value={registerBabyName}
                 onChange={(event) => setRegisterBabyName(event.target.value)}
-                  placeholder="Baby name (optional)"
+                  placeholder={appConfig.copy.register_name_placeholder}
                   className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                 />
               )}
@@ -1210,7 +1641,7 @@ export default function App() {
                 disabled={isBusy}
                 className="app-primary-button w-full rounded-2xl px-4 py-3 font-semibold disabled:opacity-60"
               >
-                {isBusy ? 'Working…' : authMode === 'register' ? 'Create household' : 'Sign in'}
+                {isBusy ? 'Working…' : authMode === 'register' ? appConfig.copy.create_account_label : 'Sign in'}
               </button>
           </div>
         </div>
@@ -1232,7 +1663,7 @@ export default function App() {
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">Baby Tracker</h1>
+              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">{appConfig.app_name}</h1>
               {displayedTrackerPageCount > 1 && (
                 <div className="inline-flex items-center gap-1">
                   {Array.from({ length: displayedTrackerPageCount }, (_, pageIndex) => (
@@ -1255,7 +1686,7 @@ export default function App() {
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <p className="app-muted text-xs">
-                {account.baby_name ? `${account.baby_name}'s household` : `${account.username}'s household`}
+                {headerContextText}
               </p>
               <button
                 type="button"
@@ -1337,11 +1768,11 @@ export default function App() {
                 <>
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-sm font-semibold mb-2">Baby name</label>
+                      <label className="block text-sm font-semibold mb-2">{appConfig.copy.settings_name_label}</label>
                       <input
                         value={settingsBabyName}
                         onChange={(event) => setSettingsBabyName(event.target.value)}
-                        placeholder="Baby name"
+                        placeholder={appConfig.copy.settings_name_placeholder}
                         className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
                     </div>
@@ -1355,7 +1786,7 @@ export default function App() {
                         className="app-input app-focus w-full rounded-2xl border px-4 py-3"
                       />
                       <p className="app-muted mt-2 text-xs">
-                        Enable sync will save the current baby name and share-email edits automatically first.
+                        {appConfig.copy.enable_sync_name_help}
                       </p>
                     </div>
                   </div>
@@ -1474,7 +1905,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleAddButtonsPage}
-                        disabled={settingsButtonPageCount >= MAX_TRACKER_BUTTON_PAGES}
+                        disabled={settingsButtonPageCount >= appConfig.max_tracker_button_pages}
                         className="app-primary-button rounded-xl px-3 py-2 text-sm font-semibold disabled:opacity-60"
                       >
                         Add page
@@ -1498,6 +1929,7 @@ export default function App() {
                             <SortableDraftButtonCard
                               key={button.id}
                               button={button}
+                              symbol={getTrackerSymbol(availableSymbols, button.icon_key)}
                               isSelected={button.id === selectedDraftButton?.id}
                               onSelect={() => setSelectedButtonId(button.id)}
                             />
@@ -1516,11 +1948,13 @@ export default function App() {
                             </p>
                           </div>
                           <div className={clsx('flex h-14 w-14 items-center justify-center rounded-2xl shadow-md', getTrackerButtonColorClass(selectedDraftButton.color_key))}>
-                            {createElement(getTrackerButtonIcon(selectedDraftButton.icon_key), {
-                              size: 24,
-                              className: 'text-white',
-                              strokeWidth: 2.4,
-                            })}
+                            <TrackerSymbolIcon
+                              symbol={getTrackerSymbol(availableSymbols, selectedDraftButton.icon_key)}
+                              iconKey={selectedDraftButton.icon_key}
+                              size={24}
+                              className="text-white"
+                              strokeWidth={2.4}
+                            />
                           </div>
                         </div>
 
@@ -1539,35 +1973,134 @@ export default function App() {
                         </div>
 
                         <div>
-                          <label className="mb-2 block text-sm font-semibold">Search symbols</label>
-                          <input
-                            value={symbolSearch}
-                            onChange={(event) => setSymbolSearch(event.target.value)}
-                            placeholder="Search work, sleep, food, health..."
-                            className="app-input app-focus w-full rounded-2xl border px-4 py-3"
-                          />
+                          <label className="mb-2 block text-sm font-semibold">Button color</label>
+                          <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                            {TRACKER_BUTTON_COLOR_OPTIONS.map((colorOption) => {
+                              const isSelected = selectedDraftButton.color_key === colorOption.key;
+                              return (
+                                <button
+                                  key={colorOption.key}
+                                  type="button"
+                                  onClick={() => updateDraftButton(selectedDraftButton.id, { color_key: colorOption.key })}
+                                  className={clsx(
+                                    'flex flex-col items-center gap-2 rounded-2xl border p-2 text-center transition',
+                                    isSelected ? 'app-page-button-active' : 'app-surface hover:opacity-90',
+                                  )}
+                                  aria-label={`Use ${colorOption.label} color`}
+                                  title={colorOption.label}
+                                >
+                                  <span
+                                    className={clsx(
+                                      'flex h-8 w-8 items-center justify-center rounded-full border border-white/20 shadow-sm',
+                                      getTrackerButtonColorClass(colorOption.key),
+                                    )}
+                                  />
+                                  <span className="text-[10px] font-semibold uppercase tracking-wide">{colorOption.label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p className="app-muted mt-2 text-xs">
+                            New placeholder pages now rotate through the palette, and you can override any button color here.
+                          </p>
                         </div>
 
-                        <div className="grid grid-cols-4 gap-2 sm:grid-cols-5 md:grid-cols-6">
-                          {filteredSymbols.map((symbol) => {
-                            const isSelected = symbol.key === selectedDraftButton.icon_key;
+                        <div>
+                          <div className="mb-2 flex items-center justify-between gap-3">
+                            <label className="block text-sm font-semibold">Calendar emoji</label>
+                            <button
+                              type="button"
+                              onClick={() => updateDraftButton(selectedDraftButton.id, { emoji_override: null })}
+                              className="app-muted text-xs font-semibold"
+                            >
+                              Use suggested
+                            </button>
+                          </div>
+                          <input
+                            value={selectedDraftButton.emoji_override ?? ''}
+                            onChange={(event) => updateDraftButton(selectedDraftButton.id, { emoji_override: event.target.value })}
+                            maxLength={16}
+                            placeholder={selectedSymbol?.emoji ?? 'Emoji'}
+                            className="app-input app-focus w-full rounded-2xl border px-4 py-3"
+                          />
+                          <p className="app-muted mt-2 text-xs">
+                            {selectedDraftButton.emoji_override && !isValidEmojiValue(selectedDraftButton.emoji_override)
+                              ? 'Enter a real emoji here, not plain text.'
+                              : 'This overrides the emoji used in the calendar preview when the default symbol match is wrong.'}
+                          </p>
+                        </div>
 
-                            return (
-                              <button
-                                key={symbol.key}
-                                type="button"
-                                onClick={() => updateDraftButton(selectedDraftButton.id, { icon_key: symbol.key })}
-                                className={clsx(
-                                  'flex aspect-square items-center justify-center rounded-2xl border p-3 transition',
-                                  isSelected ? 'app-page-button-active' : 'app-surface hover:opacity-90',
-                                )}
-                                title={symbol.label}
-                                aria-label={symbol.label}
-                              >
-                                {createElement(getTrackerButtonIcon(symbol.key), { size: 20 })}
-                              </button>
-                            );
-                          })}
+                        <div>
+                          <label className="mb-2 block text-sm font-semibold">Search symbols</label>
+                          <div className="relative">
+                            <Search className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 app-muted" size={18} />
+                            <input
+                              value={symbolSearch}
+                              onChange={(event) => setSymbolSearch(event.target.value)}
+                              placeholder="Search work, pizza, pasta, bowel, meal, custom..."
+                              className="app-input app-focus w-full rounded-2xl border py-3 pl-11 pr-4"
+                            />
+                          </div>
+                          <p className="app-muted mt-2 text-xs">
+                            Searches Lucide plus your custom icons and public community icons.
+                          </p>
+                        </div>
+
+                        {selectedSymbol && (
+                          <div className="app-subtle space-y-2 rounded-2xl border px-4 py-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-semibold">{selectedSymbol.label}</p>
+                                <p className="app-muted text-xs">
+                                  {symbolSourceLabel(selectedSymbol)}
+                                  {selectedSymbol.category ? ` · ${selectedSymbol.category}` : ''}
+                                  {selectedSymbol.emoji ? ` · default ${selectedSymbol.emoji}` : ''}
+                                </p>
+                              </div>
+                              {selectedSymbol.can_delete && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteSelectedCustomIcon()}
+                                  disabled={isDeletingCustomIcon}
+                                  className="rounded-xl border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-700 disabled:opacity-60 dark:border-rose-700 dark:text-rose-300"
+                                >
+                                  <span className="inline-flex items-center gap-2">
+                                    <Trash2 size={14} />
+                                    Delete icon
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="space-y-4">
+                          {filteredSymbolGroups.map((group) => (
+                            <div key={group.title} className="space-y-2">
+                              <p className="app-muted text-xs font-bold uppercase tracking-wide">{group.title}</p>
+                              <div className="grid grid-cols-5 gap-2 sm:grid-cols-7 md:grid-cols-9 lg:grid-cols-10">
+                                {group.symbols.map((symbol) => {
+                                  const isSelected = symbol.key === selectedDraftButton.icon_key;
+
+                                  return (
+                                    <button
+                                      key={symbol.key}
+                                      type="button"
+                                      onClick={() => updateDraftButton(selectedDraftButton.id, { icon_key: symbol.key })}
+                                      className={clsx(
+                                        'app-surface flex aspect-square items-center justify-center rounded-2xl border p-2 transition hover:opacity-90',
+                                        isSelected && 'app-page-button-active',
+                                      )}
+                                      aria-label={symbol.label}
+                                      title={`${symbol.label} · ${symbolSourceLabel(symbol)}`}
+                                    >
+                                      <TrackerSymbolIcon symbol={symbol} iconKey={symbol.key} size={20} />
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
                         </div>
 
                         {filteredSymbols.length === 0 && (
@@ -1575,6 +2108,103 @@ export default function App() {
                             No symbols match that search yet.
                           </p>
                         )}
+
+                        <div className="app-subtle space-y-4 rounded-2xl border p-4">
+                          <div className="flex items-center gap-2">
+                            <ImagePlus size={18} />
+                            <h4 className="font-semibold">Add custom icon</h4>
+                          </div>
+                          <p className="app-muted text-sm">
+                            Upload a square-ish PNG or SVG, choose the matching emoji for calendar titles, and optionally share it publicly.
+                          </p>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="app-surface flex aspect-square flex-col items-center justify-center gap-3 rounded-2xl border sm:row-span-2">
+                              {customIconDraft.previewUrl ? (
+                                <>
+                                  <img
+                                    src={customIconDraft.previewUrl}
+                                    alt="Custom icon preview"
+                                    className="h-24 w-24 object-contain"
+                                  />
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleCustomIconZoom(-1)}
+                                      disabled={!customIconDraft.sourceFile || customIconDraft.zoom <= CUSTOM_ICON_MIN_ZOOM}
+                                      className="app-page-button rounded-xl border px-3 py-1 text-sm font-semibold disabled:opacity-50"
+                                    >
+                                      -
+                                    </button>
+                                    <span className="app-muted min-w-14 text-center text-xs font-semibold">
+                                      {Math.round(customIconDraft.zoom * 100)}%
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleCustomIconZoom(1)}
+                                      disabled={!customIconDraft.sourceFile || customIconDraft.zoom >= CUSTOM_ICON_MAX_ZOOM}
+                                      className="app-page-button rounded-xl border px-3 py-1 text-sm font-semibold disabled:opacity-50"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </>
+                              ) : (
+                                <span className="app-muted text-xs">Preview</span>
+                              )}
+                            </div>
+                            <input
+                              value={customIconDraft.label}
+                              onChange={(event) => setCustomIconDraft((current) => ({ ...current, label: event.target.value }))}
+                              placeholder="Icon label"
+                              className="app-input app-focus rounded-2xl border px-4 py-3"
+                            />
+                            <input
+                              value={customIconDraft.emoji}
+                              onChange={(event) => setCustomIconDraft((current) => ({ ...current, emoji: event.target.value }))}
+                              placeholder="Emoji"
+                              className="app-input app-focus rounded-2xl border px-4 py-3"
+                            />
+                            {customIconDraft.emoji && !isValidEmojiValue(customIconDraft.emoji) && (
+                              <p className="text-sm text-rose-600 dark:text-rose-400">Enter a real emoji for calendar titles.</p>
+                            )}
+                            <input
+                              value={customIconDraft.keywords}
+                              onChange={(event) => setCustomIconDraft((current) => ({ ...current, keywords: event.target.value }))}
+                              placeholder="Keywords (comma separated)"
+                              className="app-input app-focus rounded-2xl border px-4 py-3 sm:col-span-2"
+                            />
+                            <label className="app-surface flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-medium sm:col-span-2">
+                              <input
+                                type="file"
+                                accept=".png,image/png,.svg,image/svg+xml"
+                                onChange={(event) => void handleCustomIconFileChange(event.target.files?.[0] ?? null)}
+                                className="block flex-1 text-sm"
+                              />
+                            </label>
+                            <label className="app-muted flex items-center gap-2 text-sm sm:col-span-2">
+                              <input
+                                type="checkbox"
+                                checked={customIconDraft.isPublic}
+                                onChange={(event) => setCustomIconDraft((current) => ({ ...current, isPublic: event.target.checked }))}
+                              />
+                              Make public as a community icon
+                            </label>
+                          </div>
+                          <p className="app-muted text-xs">
+                            The upload is normalized into a square PNG before saving so it renders consistently across the picker and tracker grid.
+                          </p>
+                          {customIconError && <p className="text-sm text-rose-600 dark:text-rose-400">{customIconError}</p>}
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => void handleCreateCustomIcon()}
+                              disabled={isCreatingCustomIcon}
+                              className="app-primary-button rounded-xl px-3 py-2 text-sm font-semibold disabled:opacity-60"
+                            >
+                              {isCreatingCustomIcon ? 'Uploading...' : 'Create icon'}
+                            </button>
+                          </div>
+                        </div>
 
                         <div className="app-subtle rounded-2xl border px-4 py-3 text-sm">
                           <p className={clsx('app-muted', buttonsSaveError && 'text-rose-600 dark:text-rose-400')}>

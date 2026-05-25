@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import threading
+import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
@@ -12,7 +13,7 @@ from typing import Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,6 +21,16 @@ from googleapiclient.errors import HttpError
 from sqlalchemy import text
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
+from app_profile import (
+    MAX_TRACKER_BUTTON_PAGES,
+    TRACKER_BUTTONS_PER_PAGE,
+    get_app_profile,
+    get_profile_symbol_meta,
+    get_profile_symbols,
+    get_seed_tracker_buttons,
+    get_tracker_button_templates,
+    public_app_config,
+)
 from calendar_service import (
     CalendarService,
     activity_label,
@@ -32,6 +43,7 @@ from config import (
     CALENDAR_ID,
     CORS_ALLOWED_ORIGINS,
     CREDENTIALS_PATH,
+    CUSTOM_ICON_STORAGE_DIR,
     DATABASE_URL,
     FORCE_GCAL_QUEUE_RETRY_TEST,
     FRONTEND_DIST_PATH,
@@ -41,8 +53,6 @@ from config import (
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
-TRACKER_BUTTONS_PER_PAGE = 8
-MAX_TRACKER_BUTTON_PAGES = 3
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
 DEFAULT_COLOR_PALETTE = "default"
 COLOR_PALETTE_KEYS = ("default", "blossom", "meadow", "twilight")
@@ -52,96 +62,7 @@ CALENDAR_SYNC_BASE_RETRY_SECONDS = 30
 CALENDAR_SYNC_MAX_RETRY_SECONDS = 60 * 60
 CALENDAR_SYNC_MAX_BATCH_SIZE = 10
 
-TRACKER_SYMBOLS: list[dict[str, object]] = [
-    {"key": "bottle-wine", "label": "Bottle", "emoji": "🍼", "keywords": ["milk", "feed", "drink"]},
-    {"key": "utensils", "label": "Food", "emoji": "🥄", "keywords": ["meal", "eat", "snack"]},
-    {"key": "baby", "label": "Baby", "emoji": "👶", "keywords": ["kid", "child", "care"]},
-    {"key": "droplet", "label": "Pee", "emoji": "💧", "keywords": ["diaper", "wet", "bathroom"]},
-    {"key": "moon", "label": "Sleep", "emoji": "😴", "keywords": ["nap", "rest", "night"]},
-    {"key": "toilet", "label": "Poop", "emoji": "💩", "keywords": ["diaper", "bathroom", "change"]},
-    {"key": "user-2", "label": "Person", "emoji": "🧍", "keywords": ["personal", "self", "caregiver"]},
-    {"key": "milk", "label": "Milk", "emoji": "🥛", "keywords": ["pump", "drink", "feed"]},
-    {"key": "help-circle", "label": "Help", "emoji": "❓", "keywords": ["other", "misc", "question"]},
-    {"key": "briefcase", "label": "Work", "emoji": "💼", "keywords": ["office", "job", "career"]},
-    {"key": "dumbbell", "label": "Exercise", "emoji": "🏋️", "keywords": ["workout", "gym", "fitness"]},
-    {"key": "bath", "label": "Bath", "emoji": "🛁", "keywords": ["wash", "clean", "shower"]},
-    {"key": "car-front", "label": "Travel", "emoji": "🚗", "keywords": ["drive", "trip", "car"]},
-    {"key": "shopping-bag", "label": "Errands", "emoji": "🛍️", "keywords": ["shop", "store", "buy"]},
-    {"key": "house", "label": "Home", "emoji": "🏠", "keywords": ["household", "chores", "home"]},
-    {"key": "book-open", "label": "Learning", "emoji": "📚", "keywords": ["reading", "school", "study"]},
-    {"key": "stethoscope", "label": "Health", "emoji": "🩺", "keywords": ["doctor", "medical", "care"]},
-    {"key": "phone", "label": "Call", "emoji": "📞", "keywords": ["phone", "talk", "contact"]},
-    {"key": "music-4", "label": "Music", "emoji": "🎵", "keywords": ["song", "audio", "listen"]},
-    {"key": "heart", "label": "Love", "emoji": "❤️", "keywords": ["care", "family", "connection"]},
-    {"key": "pill", "label": "Medicine", "emoji": "💊", "keywords": ["meds", "rx", "health"]},
-    {"key": "timer", "label": "Timer", "emoji": "⏱️", "keywords": ["track", "duration", "time"]},
-    {"key": "paw-print", "label": "Pet", "emoji": "🐾", "keywords": ["pet", "animal", "walk"]},
-    {"key": "bone", "label": "Pet food", "emoji": "🦴", "keywords": ["dog", "pet", "treat"]},
-    {"key": "cat", "label": "Cat", "emoji": "🐱", "keywords": ["pet", "animal", "feline"]},
-    {"key": "dog", "label": "Dog", "emoji": "🐶", "keywords": ["pet", "animal", "canine"]},
-    {"key": "fish", "label": "Fish", "emoji": "🐟", "keywords": ["pet", "tank", "aquarium"]},
-    {"key": "bird", "label": "Bird", "emoji": "🐦", "keywords": ["pet", "animal", "avian"]},
-    {"key": "rabbit", "label": "Rabbit", "emoji": "🐰", "keywords": ["pet", "animal", "bunny"]},
-    {"key": "syringe", "label": "Shot", "emoji": "💉", "keywords": ["vaccine", "medical", "medicine"]},
-    {"key": "thermometer", "label": "Temperature", "emoji": "🌡️", "keywords": ["fever", "check", "health"]},
-    {"key": "heart-pulse", "label": "Vitals", "emoji": "🫀", "keywords": ["heart", "pulse", "health"]},
-    {"key": "apple", "label": "Fruit", "emoji": "🍎", "keywords": ["snack", "food", "nutrition"]},
-    {"key": "salad", "label": "Salad", "emoji": "🥗", "keywords": ["meal", "greens", "nutrition"]},
-    {"key": "sandwich", "label": "Lunch", "emoji": "🥪", "keywords": ["meal", "food", "sandwich"]},
-    {"key": "carrot", "label": "Veggies", "emoji": "🥕", "keywords": ["vegetable", "food", "nutrition"]},
-    {"key": "coffee", "label": "Coffee", "emoji": "☕", "keywords": ["drink", "caffeine", "break"]},
-    {"key": "cake", "label": "Treat", "emoji": "🎂", "keywords": ["dessert", "celebration", "snack"]},
-    {"key": "alarm-clock", "label": "Reminder", "emoji": "⏰", "keywords": ["alarm", "wake", "time"]},
-    {"key": "calendar-check", "label": "Appointment", "emoji": "🗓️", "keywords": ["calendar", "meeting", "scheduled"]},
-    {"key": "calendar-heart", "label": "Special day", "emoji": "💗", "keywords": ["date", "anniversary", "celebration"]},
-    {"key": "clipboard-list", "label": "Checklist", "emoji": "📋", "keywords": ["tasks", "todo", "notes"]},
-    {"key": "sun", "label": "Daytime", "emoji": "☀️", "keywords": ["morning", "day", "outside"]},
-    {"key": "moon-star", "label": "Night", "emoji": "🌙", "keywords": ["evening", "bedtime", "night"]},
-    {"key": "bed", "label": "Rest", "emoji": "🛏️", "keywords": ["sleep", "nap", "bed"]},
-    {"key": "plane", "label": "Flight", "emoji": "✈️", "keywords": ["travel", "airport", "trip"]},
-    {"key": "train-front", "label": "Train", "emoji": "🚆", "keywords": ["commute", "travel", "rail"]},
-    {"key": "bus", "label": "Bus", "emoji": "🚌", "keywords": ["commute", "school", "transport"]},
-    {"key": "fork-knife", "label": "Meal", "emoji": "🍽️", "keywords": ["dinner", "restaurant", "food"]},
-    {"key": "laptop", "label": "Laptop", "emoji": "💻", "keywords": ["computer", "work", "study"]},
-    {"key": "notebook-pen", "label": "Notes", "emoji": "📝", "keywords": ["journal", "write", "study"]},
-    {"key": "shower-head", "label": "Shower", "emoji": "🚿", "keywords": ["bath", "wash", "clean"]},
-    {"key": "sparkles", "label": "Self care", "emoji": "✨", "keywords": ["beauty", "care", "reset"]},
-    {"key": "smile", "label": "Good mood", "emoji": "🙂", "keywords": ["happy", "mood", "emotion"]},
-    {"key": "frown", "label": "Low mood", "emoji": "☹️", "keywords": ["sad", "mood", "emotion"]},
-    {"key": "popcorn", "label": "Movie", "emoji": "🍿", "keywords": ["show", "movie", "fun"]},
-    {"key": "gamepad-2", "label": "Gaming", "emoji": "🎮", "keywords": ["game", "play", "hobby"]},
-    {"key": "leaf", "label": "Outdoors", "emoji": "🍃", "keywords": ["walk", "nature", "outside"]},
-    {"key": "pill-bottle", "label": "Meds", "emoji": "💊", "keywords": ["medicine", "rx", "dose"]},
-    {"key": "bike", "label": "Ride", "emoji": "🚴", "keywords": ["bike", "exercise", "commute"]},
-    {"key": "tent-tree", "label": "Adventure", "emoji": "🏕️", "keywords": ["camp", "trip", "outdoors"]},
-    {"key": "shopping-cart", "label": "Shopping", "emoji": "🛒", "keywords": ["groceries", "store", "errands"]},
-    {"key": "wallet", "label": "Money", "emoji": "👛", "keywords": ["spending", "budget", "wallet"]},
-    {"key": "banknote", "label": "Cash", "emoji": "💵", "keywords": ["money", "finance", "pay"]},
-    {"key": "gift", "label": "Gift", "emoji": "🎁", "keywords": ["present", "birthday", "celebration"]},
-    {"key": "camera", "label": "Photo", "emoji": "📷", "keywords": ["picture", "memory", "camera"]},
-    {"key": "cooking-pot", "label": "Cooking", "emoji": "🍲", "keywords": ["kitchen", "meal", "cook"]},
-    {"key": "scan-heart", "label": "Checkup", "emoji": "🩺", "keywords": ["scan", "health", "medical"]},
-    {"key": "hand-heart", "label": "Care", "emoji": "🫶", "keywords": ["support", "care", "love"]},
-]
-TRACKER_SYMBOL_META = {
-    str(symbol["key"]): {
-        "label": str(symbol["label"]),
-        "emoji": str(symbol["emoji"]),
-        "keywords": [str(keyword) for keyword in symbol["keywords"]],
-    }
-    for symbol in TRACKER_SYMBOLS
-}
 TRACKER_COLOR_KEYS = ("blue", "amber", "cyan", "pink", "indigo", "rose", "orange", "slate")
-DEFAULT_TRACKER_BUTTONS: list[dict[str, object]] = [
-    {"id": "bottle", "label": "Bottle", "icon_key": "bottle-wine", "color_key": "blue", "position": 0},
-    {"id": "food", "label": "Food", "icon_key": "utensils", "color_key": "amber", "position": 1},
-    {"id": "diaper_pee", "label": "Pee", "icon_key": "droplet", "color_key": "cyan", "position": 2},
-    {"id": "diaper_poop", "label": "Poop", "icon_key": "toilet", "color_key": "pink", "position": 3},
-    {"id": "sleep", "label": "Sleep", "icon_key": "moon", "color_key": "indigo", "position": 4},
-    {"id": "breastfeeding", "label": "Nursing", "icon_key": "user-2", "color_key": "rose", "position": 5},
-    {"id": "pump", "label": "Pump", "icon_key": "milk", "color_key": "orange", "position": 6},
-    {"id": "help", "label": "Other", "icon_key": "help-circle", "color_key": "slate", "position": 7},
-]
 
 def _prepare_database() -> None:
     if not DATABASE_URL.startswith("sqlite:///"):
@@ -154,6 +75,10 @@ def _prepare_database() -> None:
     Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
+def _prepare_custom_icon_storage() -> None:
+    CUSTOM_ICON_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def _connect_args() -> dict[str, bool]:
     if DATABASE_URL.startswith("sqlite"):
         return {"check_same_thread": False}
@@ -161,6 +86,7 @@ def _connect_args() -> dict[str, bool]:
 
 
 _prepare_database()
+_prepare_custom_icon_storage()
 engine = create_engine(DATABASE_URL, connect_args=_connect_args())
 
 
@@ -244,6 +170,21 @@ class CalendarSyncJob(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
+
+
+class CustomIcon(SQLModel, table=True):
+    __tablename__ = "custom_icon"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(index=True, foreign_key="account.id")
+    label: str
+    emoji: str
+    keywords_json: Optional[str] = None
+    asset_filename: str
+    asset_token: str = Field(index=True)
+    is_public: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class RegisterRequest(SQLModel):
@@ -344,11 +285,14 @@ class TrackerButtonConfig(SQLModel):
     icon_key: str
     color_key: str
     position: int
+    emoji_override: Optional[str] = None
 
 
 class TrackerButtonResponse(TrackerButtonConfig):
     emoji: str
     title: str
+    icon_kind: str = "lucide"
+    image_url: Optional[str] = None
 
 
 class TrackerSymbolOption(SQLModel):
@@ -356,6 +300,11 @@ class TrackerSymbolOption(SQLModel):
     label: str
     emoji: str
     keywords: list[str] = Field(default_factory=list)
+    category: Optional[str] = None
+    icon_kind: str = "lucide"
+    image_url: Optional[str] = None
+    is_public: Optional[bool] = None
+    can_delete: Optional[bool] = None
 
 
 class TrackerButtonsResponse(SQLModel):
@@ -365,6 +314,32 @@ class TrackerButtonsResponse(SQLModel):
 
 class TrackerButtonsUpdate(SQLModel):
     buttons: list[TrackerButtonConfig]
+
+
+class AppCopyResponse(SQLModel):
+    auth_badge_label: str
+    auth_heading: str
+    auth_subheading: str
+    create_account_label: str
+    register_name_placeholder: str
+    settings_name_label: str
+    settings_name_placeholder: str
+    enable_sync_name_help: str
+    header_context_with_name: str
+    header_context_without_name: str
+
+
+class AppConfigResponse(SQLModel):
+    model_config = {"populate_by_name": True}
+
+    profile_id: str
+    app_name: str
+    copy_text: AppCopyResponse = Field(alias="copy")
+    available_symbols: list[TrackerSymbolOption]
+    button_templates: list[TrackerButtonResponse]
+    tracker_buttons_per_page: int
+    max_tracker_button_pages: int
+    placeholder_button_label_prefix: str
 
 
 class SessionContext(SQLModel):
@@ -382,8 +357,8 @@ async def _app_lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="Baby Tracker API",
-    description="API for tracking baby activities",
+    title=get_app_profile().api_title,
+    description=f"API for {get_app_profile().app_name.lower()}",
     version="1.0.0",
     lifespan=_app_lifespan,
 )
@@ -512,12 +487,15 @@ def _resolve_time_zone(time_zone_name: Optional[str]):
 
 
 def _calendar_description(account: Account) -> str:
-    return f"Baby Tracker calendar for account {account.id} ({account.username})"
+    return get_app_profile().calendar_description_template.format(
+        account_id=account.id,
+        username=account.username,
+    )
 
 
 def _calendar_summary(account: Account) -> str:
     label = account.baby_name.strip() if account.baby_name else account.username
-    return f"Baby Tracker - {label}"
+    return f"{get_app_profile().calendar_summary_prefix} - {label}"
 
 
 def _calendar_url(calendar_id: Optional[str]) -> Optional[str]:
@@ -526,40 +504,250 @@ def _calendar_url(calendar_id: Optional[str]) -> Optional[str]:
     return f"https://calendar.google.com/calendar/u/0/r?cid={quote(calendar_id, safe='')}"
 
 
-def _tracker_symbol_emoji(icon_key: str) -> str:
-    return TRACKER_SYMBOL_META.get(icon_key, {}).get("emoji", "🏷️")
+def _custom_icon_key(custom_icon_id: int) -> str:
+    return f"custom:{custom_icon_id}"
 
 
-def _tracker_button_title(label: str, icon_key: str) -> str:
-    cleaned_label = label.strip()
-    return f"{_tracker_symbol_emoji(icon_key)} {cleaned_label}" if cleaned_label else _tracker_symbol_emoji(icon_key)
+def _parse_custom_icon_id(icon_key: str) -> Optional[int]:
+    prefix = "custom:"
+    if not icon_key.startswith(prefix):
+        return None
+    try:
+        return int(icon_key.removeprefix(prefix))
+    except ValueError:
+        return None
 
 
-def _tracker_button_response(button: TrackerButtonConfig) -> TrackerButtonResponse:
-    return TrackerButtonResponse(
-        **button.model_dump(),
-        emoji=_tracker_symbol_emoji(button.icon_key),
-        title=_tracker_button_title(button.label, button.icon_key),
+def _custom_icon_asset_url(custom_icon: CustomIcon) -> str:
+    return f"/custom-icons/assets/{custom_icon.asset_token}"
+
+
+def _custom_icon_keywords(custom_icon: CustomIcon) -> list[str]:
+    if not custom_icon.keywords_json:
+        return []
+    try:
+        payload = json.loads(custom_icon.keywords_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item).strip() for item in payload if str(item).strip()]
+
+
+def _custom_icon_symbol_option(custom_icon: CustomIcon, can_delete: bool = False) -> TrackerSymbolOption:
+    return TrackerSymbolOption(
+        key=_custom_icon_key(custom_icon.id or 0),
+        label=custom_icon.label,
+        emoji=custom_icon.emoji,
+        keywords=_custom_icon_keywords(custom_icon),
+        category="custom",
+        icon_kind="custom",
+        image_url=_custom_icon_asset_url(custom_icon),
+        is_public=custom_icon.is_public,
+        can_delete=can_delete,
     )
 
 
-def _available_tracker_symbols() -> list[TrackerSymbolOption]:
-    return [
+def _all_tracker_symbols(session: Session, account: Optional[Account] = None) -> list[TrackerSymbolOption]:
+    symbols = [
         TrackerSymbolOption(
             key=str(symbol["key"]),
             label=str(symbol["label"]),
             emoji=str(symbol["emoji"]),
             keywords=[str(keyword) for keyword in symbol["keywords"]],
+            category=str(symbol.get("category", "general")) if symbol.get("category") is not None else None,
+            icon_kind=str(symbol.get("icon_kind", "lucide")),
         )
-        for symbol in TRACKER_SYMBOLS
+        for symbol in get_profile_symbols()
     ]
+    if account is None or account.id is None:
+        return symbols
+
+    custom_icons = session.exec(
+        select(CustomIcon)
+        .where((CustomIcon.account_id == account.id) | (CustomIcon.is_public.is_(True)))
+        .order_by(CustomIcon.is_public.desc(), CustomIcon.label.asc())
+    ).all()
+    symbols.extend(
+        _custom_icon_symbol_option(
+            custom_icon,
+            can_delete=bool(account.id is not None and custom_icon.account_id == account.id),
+        )
+        for custom_icon in custom_icons
+        if custom_icon.id is not None
+    )
+    return symbols
+
+
+def _tracker_symbol_meta(symbols: list[TrackerSymbolOption]) -> dict[str, dict[str, object]]:
+    return {
+        symbol.key: {
+            "label": symbol.label,
+            "emoji": symbol.emoji,
+            "keywords": list(symbol.keywords),
+            "category": symbol.category,
+            "icon_kind": symbol.icon_kind,
+            "image_url": symbol.image_url,
+            "is_public": symbol.is_public,
+            "can_delete": symbol.can_delete,
+        }
+        for symbol in symbols
+    }
+
+
+def _is_valid_emoji_value(value: str) -> bool:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 16:
+        return False
+
+    has_emoji = False
+    for char in normalized:
+        codepoint = ord(char)
+        if codepoint in {0x200D, 0xFE0F, 0xFE0E, 0x20E3}:
+            continue
+        if 0x1F1E6 <= codepoint <= 0x1F1FF:
+            has_emoji = True
+            continue
+        if unicodedata.category(char) == "So" or 0x2600 <= codepoint <= 0x27BF:
+            has_emoji = True
+            continue
+        return False
+    return has_emoji
+
+
+def _normalize_emoji_value(value: str, field_label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_label} is required",
+        )
+    if not _is_valid_emoji_value(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_label} must be a valid emoji",
+        )
+    return normalized
+
+
+def _normalize_optional_emoji_value(value: Optional[str], field_label: str) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return _normalize_emoji_value(normalized, field_label)
+
+
+def _tracker_symbol_emoji(
+    icon_key: str,
+    symbol_meta: Optional[dict[str, dict[str, object]]] = None,
+    emoji_override: Optional[str] = None,
+) -> str:
+    if emoji_override:
+        return emoji_override
+    lookup = symbol_meta or get_profile_symbol_meta()
+    return str(lookup.get(icon_key, {}).get("emoji", get_app_profile().unknown_activity_emoji))
+
+
+def _normalize_custom_icon_label(label: str) -> str:
+    normalized = label.strip()
+    if not normalized:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Custom icon label is required")
+    if len(normalized) > 64:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Custom icon label must be 64 characters or fewer",
+        )
+    return normalized
+
+
+def _normalize_custom_icon_emoji(emoji: str) -> str:
+    return _normalize_emoji_value(emoji, "Custom icon emoji")
+
+
+def _normalize_custom_icon_keywords(raw_keywords: Optional[str]) -> list[str]:
+    if raw_keywords is None:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for piece in raw_keywords.replace("\n", ",").split(","):
+        keyword = piece.strip().lower()
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        normalized.append(keyword)
+    return normalized[:24]
+
+
+def _is_truthy_form_value(value: Optional[str]) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _custom_icon_extension(upload: UploadFile) -> str:
+    content_type = (upload.content_type or "").lower()
+    suffix = Path(upload.filename or "").suffix.lower()
+    if content_type == "image/png" or suffix == ".png":
+        return ".png"
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="Custom icons must be uploaded as PNG",
+    )
+
+
+def _write_custom_icon_asset(upload: UploadFile) -> tuple[str, str]:
+    extension = _custom_icon_extension(upload)
+    asset_token = secrets.token_urlsafe(24)
+    asset_filename = f"{asset_token}{extension}"
+    asset_path = CUSTOM_ICON_STORAGE_DIR / asset_filename
+    payload = upload.file.read()
+    if len(payload) > 2 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Custom icon files must be 2MB or smaller",
+        )
+    asset_path.write_bytes(payload)
+    return asset_token, asset_filename
+
+
+def _tracker_button_title(
+    label: str,
+    icon_key: str,
+    symbol_meta: Optional[dict[str, dict[str, object]]] = None,
+    emoji_override: Optional[str] = None,
+) -> str:
+    cleaned_label = label.strip()
+    resolved_emoji = _tracker_symbol_emoji(icon_key, symbol_meta, emoji_override)
+    return f"{resolved_emoji} {cleaned_label}" if cleaned_label else resolved_emoji
+
+
+def _tracker_button_response(button: TrackerButtonConfig, symbol_meta: Optional[dict[str, dict[str, object]]] = None) -> TrackerButtonResponse:
+    resolved_meta = symbol_meta or get_profile_symbol_meta()
+    symbol = resolved_meta.get(button.icon_key, {})
+    return TrackerButtonResponse(
+        **button.model_dump(),
+        emoji=_tracker_symbol_emoji(button.icon_key, resolved_meta, button.emoji_override),
+        title=_tracker_button_title(button.label, button.icon_key, resolved_meta, button.emoji_override),
+        icon_kind=str(symbol.get("icon_kind", "lucide")),
+        image_url=str(symbol["image_url"]) if symbol.get("image_url") else None,
+    )
+
+
+def _available_tracker_symbols() -> list[TrackerSymbolOption]:
+    with Session(engine) as session:
+        return _all_tracker_symbols(session)
 
 
 def _default_tracker_buttons() -> list[TrackerButtonConfig]:
-    return [TrackerButtonConfig(**button) for button in DEFAULT_TRACKER_BUTTONS]
+    return [TrackerButtonConfig.model_validate(button) for button in get_seed_tracker_buttons()]
 
 
-def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
+def _validate_tracker_buttons(
+    buttons: list[TrackerButtonConfig],
+    symbol_meta: dict[str, dict[str, object]],
+    *,
+    allow_unknown_icon_fallback: bool = False,
+) -> list[TrackerButtonConfig]:
     if len(buttons) < TRACKER_BUTTONS_PER_PAGE or len(buttons) % TRACKER_BUTTONS_PER_PAGE != 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -593,11 +781,14 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
             )
 
         icon_key = button.icon_key.strip()
-        if icon_key not in TRACKER_SYMBOL_META:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unknown tracker symbol '{button.icon_key}'",
-            )
+        if icon_key not in symbol_meta:
+            if allow_unknown_icon_fallback:
+                icon_key = "help-circle" if "help-circle" in symbol_meta else next(iter(symbol_meta.keys()))
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Unknown tracker symbol '{button.icon_key}'",
+                )
 
         color_key = button.color_key.strip()
         if color_key not in TRACKER_COLOR_KEYS:
@@ -606,6 +797,8 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
                 detail=f"Unknown tracker color '{button.color_key}'",
             )
 
+        emoji_override = _normalize_optional_emoji_value(button.emoji_override, "Button emoji override")
+
         normalized_buttons.append(
             TrackerButtonConfig(
                 id=button_id,
@@ -613,6 +806,7 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
                 icon_key=icon_key,
                 color_key=color_key,
                 position=position,
+                emoji_override=emoji_override,
             )
         )
         seen_ids.add(button_id)
@@ -621,7 +815,7 @@ def _validate_tracker_buttons(buttons: list[TrackerButtonConfig]) -> list[Tracke
 
 
 def _store_tracker_buttons(session: Session, account: Account, buttons: list[TrackerButtonConfig]) -> list[TrackerButtonConfig]:
-    validated_buttons = _validate_tracker_buttons(buttons)
+    validated_buttons = _validate_tracker_buttons(buttons, _tracker_symbol_meta(_all_tracker_symbols(session, account)))
     account.tracker_buttons_json = json.dumps(
         [button.model_dump() for button in validated_buttons],
         separators=(",", ":"),
@@ -640,16 +834,22 @@ def _get_tracker_buttons(session: Session, account: Account) -> list[TrackerButt
     try:
         raw_buttons = json.loads(account.tracker_buttons_json)
         parsed_buttons = [TrackerButtonConfig.model_validate(raw_button) for raw_button in raw_buttons]
-        return _validate_tracker_buttons(parsed_buttons)
+        return _validate_tracker_buttons(
+            parsed_buttons,
+            _tracker_symbol_meta(_all_tracker_symbols(session, account)),
+            allow_unknown_icon_fallback=True,
+        )
     except (json.JSONDecodeError, TypeError, ValueError, HTTPException):
         return _store_tracker_buttons(session, account, _default_tracker_buttons())
 
 
 def _tracker_buttons_response(session: Session, account: Account) -> TrackerButtonsResponse:
     buttons = _get_tracker_buttons(session, account)
+    symbols = _all_tracker_symbols(session, account)
+    symbol_meta = _tracker_symbol_meta(symbols)
     return TrackerButtonsResponse(
-        buttons=[_tracker_button_response(button) for button in buttons],
-        available_symbols=_available_tracker_symbols(),
+        buttons=[_tracker_button_response(button, symbol_meta) for button in buttons],
+        available_symbols=symbols,
     )
 
 
@@ -658,11 +858,15 @@ def _find_tracker_button(buttons: list[TrackerButtonConfig], activity_type: str)
     return next((button for button in buttons if button.id == normalized_type), None)
 
 
-def _resolved_event_title(buttons: list[TrackerButtonConfig], activity_type: str) -> str:
+def _resolved_event_title(
+    buttons: list[TrackerButtonConfig],
+    activity_type: str,
+    symbol_meta: Optional[dict[str, dict[str, object]]] = None,
+) -> str:
     button = _find_tracker_button(buttons, activity_type)
     if button is None:
         return activity_label(activity_type)
-    return _tracker_button_title(button.label, button.icon_key)
+    return _tracker_button_title(button.label, button.icon_key, symbol_meta, button.emoji_override)
 
 
 def _parse_target_date(target_date: Optional[str], local_time_zone) -> date:
@@ -756,6 +960,10 @@ def _load_account(session: Session, account_id: int) -> Account:
     if not account:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
     return account
+
+
+def _app_running_message() -> str:
+    return f"{get_app_profile().app_name} API is running"
 
 
 def _mark_event_local_only(event: Event) -> Event:
@@ -939,7 +1147,7 @@ def _adopt_legacy_events(session: Session, account: Account) -> None:
 
     if CALENDAR_ID and not account.google_calendar_id:
         account.google_calendar_id = CALENDAR_ID
-        account.google_calendar_summary = "Legacy Shared Calendar"
+        account.google_calendar_summary = f"{get_app_profile().app_name} Legacy Calendar"
         account.service_managed_calendar = False
         account.calendar_connected_at = datetime.now(timezone.utc)
         session.add(account)
@@ -1472,12 +1680,100 @@ _ensure_event_columns()
 
 @app.get("/health")
 def read_health():
-    return {"message": "Baby Tracker API is running"}
+    return {"message": _app_running_message()}
+
+
+@app.get("/app-config", response_model=AppConfigResponse)
+def read_app_config():
+    payload = public_app_config()
+    symbol_meta = get_profile_symbol_meta()
+    return AppConfigResponse(
+        profile_id=str(payload["profile_id"]),
+        app_name=str(payload["app_name"]),
+        copy_text=AppCopyResponse.model_validate(payload["copy"]),
+        available_symbols=[TrackerSymbolOption.model_validate(symbol) for symbol in payload["available_symbols"]],
+        button_templates=[
+            _tracker_button_response(TrackerButtonConfig.model_validate(button), symbol_meta)
+            for button in payload["button_templates"]
+        ],
+        tracker_buttons_per_page=int(payload["tracker_buttons_per_page"]),
+        max_tracker_button_pages=int(payload["max_tracker_button_pages"]),
+        placeholder_button_label_prefix=str(payload["placeholder_button_label_prefix"]),
+    )
 
 
 @app.get("/")
 def read_root():
-    return _frontend_file_response("index.html") or {"message": "Baby Tracker API is running"}
+    return _frontend_file_response("index.html") or {"message": _app_running_message()}
+
+
+@app.get("/custom-icons/assets/{asset_token}")
+def read_custom_icon_asset(asset_token: str):
+    with Session(engine) as session:
+        custom_icon = session.exec(select(CustomIcon).where(CustomIcon.asset_token == asset_token)).first()
+        if custom_icon is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom icon not found")
+
+        asset_path = (CUSTOM_ICON_STORAGE_DIR / custom_icon.asset_filename).resolve()
+        try:
+            asset_path.relative_to(CUSTOM_ICON_STORAGE_DIR.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom icon not found") from exc
+        if not asset_path.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom icon not found")
+        return FileResponse(asset_path)
+
+
+@app.post("/custom-icons", response_model=TrackerSymbolOption)
+def create_custom_icon_endpoint(
+    label: str = Form(...),
+    emoji: str = Form(...),
+    keywords: Optional[str] = Form(default=None),
+    is_public: Optional[str] = Form(default=None),
+    asset: UploadFile = File(...),
+    session_context: SessionContext = Depends(require_session),
+):
+    normalized_label = _normalize_custom_icon_label(label)
+    normalized_emoji = _normalize_custom_icon_emoji(emoji)
+    normalized_keywords = _normalize_custom_icon_keywords(keywords)
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        asset_token, asset_filename = _write_custom_icon_asset(asset)
+        custom_icon = CustomIcon(
+            account_id=account.id,
+            label=normalized_label,
+            emoji=normalized_emoji,
+            keywords_json=json.dumps(normalized_keywords),
+            asset_token=asset_token,
+            asset_filename=asset_filename,
+            is_public=_is_truthy_form_value(is_public),
+        )
+        session.add(custom_icon)
+        session.commit()
+        session.refresh(custom_icon)
+        return _custom_icon_symbol_option(custom_icon, can_delete=True)
+
+
+@app.delete("/custom-icons/{custom_icon_id}")
+def delete_custom_icon_endpoint(custom_icon_id: int, session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        custom_icon = session.exec(select(CustomIcon).where(CustomIcon.id == custom_icon_id)).first()
+        if custom_icon is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom icon not found")
+        if custom_icon.account_id != session_context.account_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom icon not found")
+
+        asset_path = (CUSTOM_ICON_STORAGE_DIR / custom_icon.asset_filename).resolve()
+        session.delete(custom_icon)
+        session.commit()
+
+        try:
+            asset_path.relative_to(CUSTOM_ICON_STORAGE_DIR.resolve())
+        except ValueError:
+            return {"status": "success"}
+        if asset_path.is_file():
+            asset_path.unlink()
+        return {"status": "success"}
 
 
 @app.post("/auth/register", response_model=AuthResponse)
@@ -1688,11 +1984,12 @@ def create_event_endpoint(event: EventCreate, session_context: SessionContext = 
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         tracker_buttons = _get_tracker_buttons(session, account)
+        symbol_meta = _tracker_symbol_meta(_all_tracker_symbols(session, account))
         activity_type = normalize_activity_type(event.type)
         db_event = Event(
             account_id=account.id,
             type=activity_type,
-            title=_resolved_event_title(tracker_buttons, activity_type),
+            title=_resolved_event_title(tracker_buttons, activity_type, symbol_meta),
             start_time=_to_utc(event.start_time),
             end_time=_to_utc(event.end_time) if event.end_time is not None else None,
             duration=event.duration,
@@ -1776,12 +2073,14 @@ def simulate_day_endpoint(
         deleted_count = _delete_events_for_day(session, account, parsed_date, local_time_zone)
         created_count = 0
         tracker_buttons = _get_tracker_buttons(session, account)
+        symbol_meta = _tracker_symbol_meta(_all_tracker_symbols(session, account))
         for payload in _sample_day_events(
             parsed_date,
             local_time_zone,
             tracker_buttons,
             seed_value=f"{account.id}:{parsed_date.isoformat()}",
         ):
+            payload["title"] = _resolved_event_title(tracker_buttons, str(payload["type"]), symbol_meta)
             event = Event(account_id=account.id, **payload)
             session.add(event)
             session.commit()
@@ -1809,6 +2108,7 @@ def start_activity_endpoint(activity: ActivityStart, session_context: SessionCon
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         tracker_buttons = _get_tracker_buttons(session, account)
+        symbol_meta = _tracker_symbol_meta(_all_tracker_symbols(session, account))
         activity_type = normalize_activity_type(activity.type)
         if _get_active_event(session, account.id, activity_type):
             return {"status": "error", "message": f"Activity '{activity_type}' is already running"}
@@ -1816,7 +2116,7 @@ def start_activity_endpoint(activity: ActivityStart, session_context: SessionCon
         db_event = Event(
             account_id=account.id,
             type=activity_type,
-            title=_resolved_event_title(tracker_buttons, activity_type),
+            title=_resolved_event_title(tracker_buttons, activity_type, symbol_meta),
             start_time=datetime.now(timezone.utc),
             details=activity.details.strip() if activity.details else None,
             is_active=True,

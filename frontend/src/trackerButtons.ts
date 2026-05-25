@@ -1,75 +1,3 @@
-import {
-  AlarmClock,
-  Apple,
-  Baby,
-  Banknote,
-  Bath,
-  Bed,
-  Bike,
-  Bird,
-  Bone,
-  BookOpen,
-  BottleWine,
-  Briefcase,
-  Bus,
-  Cake,
-  CalendarCheck,
-  CalendarHeart,
-  CarFront,
-  Camera,
-  Carrot,
-  Cat,
-  ClipboardList,
-  Coffee,
-  CookingPot,
-  Dog,
-  Droplet,
-  Dumbbell,
-  Fish,
-  ForkKnife,
-  Frown,
-  Gamepad2,
-  Gift,
-  HandHeart,
-  Heart,
-  HeartPulse,
-  HelpCircle,
-  House,
-  Leaf,
-  Milk,
-  Moon,
-  MoonStar,
-  Music4,
-  NotebookPen,
-  PawPrint,
-  Phone,
-  Pill,
-  PillBottle,
-  Plane,
-  Popcorn,
-  Rabbit,
-  Salad,
-  Sandwich,
-  ScanHeart,
-  ShoppingCart,
-  ShoppingBag,
-  ShowerHead,
-  Smile,
-  Sparkles,
-  Stethoscope,
-  Sun,
-  Syringe,
-  TentTree,
-  Thermometer,
-  Timer,
-  TrainFront,
-  Toilet,
-  User2,
-  Utensils,
-  Wallet,
-  type LucideIcon,
-} from 'lucide-react';
-
 export interface TrackerButtonConfig {
   id: string;
   label: string;
@@ -78,6 +6,9 @@ export interface TrackerButtonConfig {
   position: number;
   emoji: string;
   title: string;
+  emoji_override?: string | null;
+  icon_kind?: 'lucide' | 'custom';
+  image_url?: string | null;
 }
 
 export interface TrackerButtonUpdate {
@@ -86,6 +17,7 @@ export interface TrackerButtonUpdate {
   icon_key: string;
   color_key: string;
   position: number;
+  emoji_override?: string | null;
 }
 
 export interface TrackerSymbolOption {
@@ -93,6 +25,11 @@ export interface TrackerSymbolOption {
   label: string;
   emoji: string;
   keywords: string[];
+  category?: string | null;
+  icon_kind?: 'lucide' | 'custom';
+  image_url?: string | null;
+  is_public?: boolean | null;
+  can_delete?: boolean | null;
 }
 
 export interface TrackerButtonsResponse {
@@ -103,77 +40,20 @@ export interface TrackerButtonsResponse {
 export const TRACKER_BUTTONS_PER_PAGE = 8;
 export const MAX_TRACKER_BUTTON_PAGES = 3;
 const PLACEHOLDER_PAGE_PREFIX = 'extra_page';
-
-const ICONS_BY_KEY: Record<string, LucideIcon> = {
-  'alarm-clock': AlarmClock,
-  apple: Apple,
-  baby: Baby,
-  banknote: Banknote,
-  bath: Bath,
-  bed: Bed,
-  bike: Bike,
-  bird: Bird,
-  bone: Bone,
-  'book-open': BookOpen,
-  'bottle-wine': BottleWine,
-  briefcase: Briefcase,
-  bus: Bus,
-  cake: Cake,
-  'calendar-check': CalendarCheck,
-  'calendar-heart': CalendarHeart,
-  'car-front': CarFront,
-  camera: Camera,
-  carrot: Carrot,
-  cat: Cat,
-  'clipboard-list': ClipboardList,
-  coffee: Coffee,
-  'cooking-pot': CookingPot,
-  dog: Dog,
-  droplet: Droplet,
-  dumbbell: Dumbbell,
-  fish: Fish,
-  'fork-knife': ForkKnife,
-  frown: Frown,
-  'gamepad-2': Gamepad2,
-  gift: Gift,
-  'hand-heart': HandHeart,
-  heart: Heart,
-  'heart-pulse': HeartPulse,
-  'help-circle': HelpCircle,
-  house: House,
-  leaf: Leaf,
-  milk: Milk,
-  moon: Moon,
-  'moon-star': MoonStar,
-  'music-4': Music4,
-  'notebook-pen': NotebookPen,
-  'paw-print': PawPrint,
-  phone: Phone,
-  pill: Pill,
-  'pill-bottle': PillBottle,
-  plane: Plane,
-  popcorn: Popcorn,
-  rabbit: Rabbit,
-  salad: Salad,
-  sandwich: Sandwich,
-  'scan-heart': ScanHeart,
-  'shopping-cart': ShoppingCart,
-  'shopping-bag': ShoppingBag,
-  'shower-head': ShowerHead,
-  smile: Smile,
-  sparkles: Sparkles,
-  stethoscope: Stethoscope,
-  sun: Sun,
-  syringe: Syringe,
-  'tent-tree': TentTree,
-  thermometer: Thermometer,
-  timer: Timer,
-  'train-front': TrainFront,
-  toilet: Toilet,
-  'user-2': User2,
-  utensils: Utensils,
-  wallet: Wallet,
-};
+export const TRACKER_BUTTON_COLOR_KEYS = ['blue', 'amber', 'cyan', 'pink', 'indigo', 'rose', 'orange', 'slate'] as const;
+export const TRACKER_BUTTON_COLOR_OPTIONS = [
+  { key: 'blue', label: 'Blue' },
+  { key: 'amber', label: 'Amber' },
+  { key: 'cyan', label: 'Cyan' },
+  { key: 'pink', label: 'Pink' },
+  { key: 'indigo', label: 'Indigo' },
+  { key: 'rose', label: 'Rose' },
+  { key: 'orange', label: 'Orange' },
+  { key: 'slate', label: 'Slate' },
+] as const;
+const FALLBACK_SYMBOLS: TrackerSymbolOption[] = [
+  { key: 'help-circle', label: 'Other', emoji: '❓', keywords: ['other'], icon_kind: 'lucide' },
+];
 
 const COLOR_CLASS_BY_KEY: Record<string, string> = {
   blue: 'tracker-color-blue',
@@ -186,117 +66,55 @@ const COLOR_CLASS_BY_KEY: Record<string, string> = {
   slate: 'tracker-color-slate',
 };
 
-export const DEFAULT_TRACKER_SYMBOLS: TrackerSymbolOption[] = [
-  { key: 'bottle-wine', label: 'Bottle', emoji: '🍼', keywords: ['milk', 'feed', 'drink'] },
-  { key: 'utensils', label: 'Food', emoji: '🥄', keywords: ['meal', 'eat', 'snack'] },
-  { key: 'baby', label: 'Baby', emoji: '👶', keywords: ['kid', 'child', 'care'] },
-  { key: 'droplet', label: 'Pee', emoji: '💧', keywords: ['diaper', 'wet', 'bathroom'] },
-  { key: 'moon', label: 'Sleep', emoji: '😴', keywords: ['nap', 'rest', 'night'] },
-  { key: 'toilet', label: 'Poop', emoji: '💩', keywords: ['diaper', 'bathroom', 'change'] },
-  { key: 'user-2', label: 'Person', emoji: '🧍', keywords: ['personal', 'self', 'caregiver'] },
-  { key: 'milk', label: 'Milk', emoji: '🥛', keywords: ['pump', 'drink', 'feed'] },
-  { key: 'help-circle', label: 'Help', emoji: '❓', keywords: ['other', 'misc', 'question'] },
-  { key: 'briefcase', label: 'Work', emoji: '💼', keywords: ['office', 'job', 'career'] },
-  { key: 'dumbbell', label: 'Exercise', emoji: '🏋️', keywords: ['workout', 'gym', 'fitness'] },
-  { key: 'bath', label: 'Bath', emoji: '🛁', keywords: ['wash', 'clean', 'shower'] },
-  { key: 'car-front', label: 'Travel', emoji: '🚗', keywords: ['drive', 'trip', 'car'] },
-  { key: 'shopping-bag', label: 'Errands', emoji: '🛍️', keywords: ['shop', 'store', 'buy'] },
-  { key: 'house', label: 'Home', emoji: '🏠', keywords: ['household', 'chores', 'home'] },
-  { key: 'book-open', label: 'Learning', emoji: '📚', keywords: ['reading', 'school', 'study'] },
-  { key: 'stethoscope', label: 'Health', emoji: '🩺', keywords: ['doctor', 'medical', 'care'] },
-  { key: 'phone', label: 'Call', emoji: '📞', keywords: ['phone', 'talk', 'contact'] },
-  { key: 'music-4', label: 'Music', emoji: '🎵', keywords: ['song', 'audio', 'listen'] },
-  { key: 'heart', label: 'Love', emoji: '❤️', keywords: ['care', 'family', 'connection'] },
-  { key: 'pill', label: 'Medicine', emoji: '💊', keywords: ['meds', 'rx', 'health'] },
-  { key: 'timer', label: 'Timer', emoji: '⏱️', keywords: ['track', 'duration', 'time'] },
-  { key: 'paw-print', label: 'Pet', emoji: '🐾', keywords: ['pet', 'animal', 'walk'] },
-  { key: 'bone', label: 'Pet food', emoji: '🦴', keywords: ['dog', 'pet', 'treat'] },
-  { key: 'cat', label: 'Cat', emoji: '🐱', keywords: ['pet', 'animal', 'feline'] },
-  { key: 'dog', label: 'Dog', emoji: '🐶', keywords: ['pet', 'animal', 'canine'] },
-  { key: 'fish', label: 'Fish', emoji: '🐟', keywords: ['pet', 'tank', 'aquarium'] },
-  { key: 'bird', label: 'Bird', emoji: '🐦', keywords: ['pet', 'animal', 'avian'] },
-  { key: 'rabbit', label: 'Rabbit', emoji: '🐰', keywords: ['pet', 'animal', 'bunny'] },
-  { key: 'syringe', label: 'Shot', emoji: '💉', keywords: ['vaccine', 'medical', 'medicine'] },
-  { key: 'thermometer', label: 'Temperature', emoji: '🌡️', keywords: ['fever', 'check', 'health'] },
-  { key: 'heart-pulse', label: 'Vitals', emoji: '🫀', keywords: ['heart', 'pulse', 'health'] },
-  { key: 'apple', label: 'Fruit', emoji: '🍎', keywords: ['snack', 'food', 'nutrition'] },
-  { key: 'salad', label: 'Salad', emoji: '🥗', keywords: ['meal', 'greens', 'nutrition'] },
-  { key: 'sandwich', label: 'Lunch', emoji: '🥪', keywords: ['meal', 'food', 'sandwich'] },
-  { key: 'carrot', label: 'Veggies', emoji: '🥕', keywords: ['vegetable', 'food', 'nutrition'] },
-  { key: 'coffee', label: 'Coffee', emoji: '☕', keywords: ['drink', 'caffeine', 'break'] },
-  { key: 'cake', label: 'Treat', emoji: '🎂', keywords: ['dessert', 'celebration', 'snack'] },
-  { key: 'alarm-clock', label: 'Reminder', emoji: '⏰', keywords: ['alarm', 'wake', 'time'] },
-  { key: 'calendar-check', label: 'Appointment', emoji: '🗓️', keywords: ['calendar', 'meeting', 'scheduled'] },
-  { key: 'calendar-heart', label: 'Special day', emoji: '💗', keywords: ['date', 'anniversary', 'celebration'] },
-  { key: 'clipboard-list', label: 'Checklist', emoji: '📋', keywords: ['tasks', 'todo', 'notes'] },
-  { key: 'sun', label: 'Daytime', emoji: '☀️', keywords: ['morning', 'day', 'outside'] },
-  { key: 'moon-star', label: 'Night', emoji: '🌙', keywords: ['evening', 'bedtime', 'night'] },
-  { key: 'bed', label: 'Rest', emoji: '🛏️', keywords: ['sleep', 'nap', 'bed'] },
-  { key: 'plane', label: 'Flight', emoji: '✈️', keywords: ['travel', 'airport', 'trip'] },
-  { key: 'train-front', label: 'Train', emoji: '🚆', keywords: ['commute', 'travel', 'rail'] },
-  { key: 'bus', label: 'Bus', emoji: '🚌', keywords: ['commute', 'school', 'transport'] },
-  { key: 'fork-knife', label: 'Meal', emoji: '🍽️', keywords: ['dinner', 'restaurant', 'food'] },
-  { key: 'laptop', label: 'Laptop', emoji: '💻', keywords: ['computer', 'work', 'study'] },
-  { key: 'notebook-pen', label: 'Notes', emoji: '📝', keywords: ['journal', 'write', 'study'] },
-  { key: 'shower-head', label: 'Shower', emoji: '🚿', keywords: ['bath', 'wash', 'clean'] },
-  { key: 'sparkles', label: 'Self care', emoji: '✨', keywords: ['beauty', 'care', 'reset'] },
-  { key: 'smile', label: 'Good mood', emoji: '🙂', keywords: ['happy', 'mood', 'emotion'] },
-  { key: 'frown', label: 'Low mood', emoji: '☹️', keywords: ['sad', 'mood', 'emotion'] },
-  { key: 'popcorn', label: 'Movie', emoji: '🍿', keywords: ['show', 'movie', 'fun'] },
-  { key: 'gamepad-2', label: 'Gaming', emoji: '🎮', keywords: ['game', 'play', 'hobby'] },
-  { key: 'leaf', label: 'Outdoors', emoji: '🍃', keywords: ['walk', 'nature', 'outside'] },
-  { key: 'pill-bottle', label: 'Meds', emoji: '💊', keywords: ['medicine', 'rx', 'dose'] },
-  { key: 'bike', label: 'Ride', emoji: '🚴', keywords: ['bike', 'exercise', 'commute'] },
-  { key: 'tent-tree', label: 'Adventure', emoji: '🏕️', keywords: ['camp', 'trip', 'outdoors'] },
-  { key: 'shopping-cart', label: 'Shopping', emoji: '🛒', keywords: ['groceries', 'store', 'errands'] },
-  { key: 'wallet', label: 'Money', emoji: '👛', keywords: ['spending', 'budget', 'wallet'] },
-  { key: 'banknote', label: 'Cash', emoji: '💵', keywords: ['money', 'finance', 'pay'] },
-  { key: 'gift', label: 'Gift', emoji: '🎁', keywords: ['present', 'birthday', 'celebration'] },
-  { key: 'camera', label: 'Photo', emoji: '📷', keywords: ['picture', 'memory', 'camera'] },
-  { key: 'cooking-pot', label: 'Cooking', emoji: '🍲', keywords: ['kitchen', 'meal', 'cook'] },
-  { key: 'scan-heart', label: 'Checkup', emoji: '🩺', keywords: ['scan', 'health', 'medical'] },
-  { key: 'hand-heart', label: 'Care', emoji: '🫶', keywords: ['support', 'care', 'love'] },
-];
-
-export const DEFAULT_TRACKER_BUTTONS: TrackerButtonConfig[] = [
-  { id: 'bottle', label: 'Bottle', icon_key: 'bottle-wine', color_key: 'blue', position: 0, emoji: '🍼', title: '🍼 Bottle' },
-  { id: 'food', label: 'Food', icon_key: 'utensils', color_key: 'amber', position: 1, emoji: '🥄', title: '🥄 Food' },
-  { id: 'diaper_pee', label: 'Pee', icon_key: 'droplet', color_key: 'cyan', position: 2, emoji: '💧', title: '💧 Pee' },
-  { id: 'diaper_poop', label: 'Poop', icon_key: 'toilet', color_key: 'pink', position: 3, emoji: '💩', title: '💩 Poop' },
-  { id: 'sleep', label: 'Sleep', icon_key: 'moon', color_key: 'indigo', position: 4, emoji: '😴', title: '😴 Sleep' },
-  { id: 'breastfeeding', label: 'Nursing', icon_key: 'user-2', color_key: 'rose', position: 5, emoji: '🧍', title: '🧍 Nursing' },
-  { id: 'pump', label: 'Pump', icon_key: 'milk', color_key: 'orange', position: 6, emoji: '🥛', title: '🥛 Pump' },
-  { id: 'help', label: 'Other', icon_key: 'help-circle', color_key: 'slate', position: 7, emoji: '❓', title: '❓ Other' },
-];
-
-export const SECOND_PAGE_DEFAULT_TRACKER_BUTTONS: TrackerButtonConfig[] = [
-  { id: 'medicine', label: 'Medicine', icon_key: 'pill-bottle', color_key: 'rose', position: 8, emoji: '💊', title: '💊 Medicine' },
-  { id: 'temperature', label: 'Temp', icon_key: 'thermometer', color_key: 'amber', position: 9, emoji: '🌡️', title: '🌡️ Temp' },
-  { id: 'bath', label: 'Bath', icon_key: 'bath', color_key: 'cyan', position: 10, emoji: '🛁', title: '🛁 Bath' },
-  { id: 'outside', label: 'Outside', icon_key: 'leaf', color_key: 'blue', position: 11, emoji: '🍃', title: '🍃 Outside' },
-  { id: 'tummy_time', label: 'Tummy', icon_key: 'baby', color_key: 'pink', position: 12, emoji: '👶', title: '👶 Tummy' },
-  { id: 'play', label: 'Play', icon_key: 'gamepad-2', color_key: 'indigo', position: 13, emoji: '🎮', title: '🎮 Play' },
-  { id: 'doctor', label: 'Doctor', icon_key: 'stethoscope', color_key: 'orange', position: 14, emoji: '🩺', title: '🩺 Doctor' },
-  { id: 'notes', label: 'Notes', icon_key: 'notebook-pen', color_key: 'slate', position: 15, emoji: '📝', title: '📝 Notes' },
-];
-
-export function getTrackerButtonIcon(iconKey: string): LucideIcon {
-  return ICONS_BY_KEY[iconKey] ?? HelpCircle;
-}
-
 export function getTrackerButtonColorClass(colorKey: string): string {
   return COLOR_CLASS_BY_KEY[colorKey] ?? COLOR_CLASS_BY_KEY.slate;
 }
 
 export function getTrackerSymbol(symbols: TrackerSymbolOption[], iconKey: string): TrackerSymbolOption | undefined {
-  return symbols.find((symbol) => symbol.key === iconKey) ?? DEFAULT_TRACKER_SYMBOLS.find((symbol) => symbol.key === iconKey);
+  return symbols.find((symbol) => symbol.key === iconKey) ?? FALLBACK_SYMBOLS.find((symbol) => symbol.key === iconKey);
+}
+
+export function isValidEmojiValue(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 16) {
+    return false;
+  }
+
+  let hasEmoji = false;
+  for (const char of normalized) {
+    const codePoint = char.codePointAt(0);
+    if (!codePoint) {
+      return false;
+    }
+    if (codePoint === 0x200D || codePoint === 0xFE0F || codePoint === 0xFE0E || codePoint === 0x20E3) {
+      continue;
+    }
+    if (codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF) {
+      hasEmoji = true;
+      continue;
+    }
+    if (/\p{Extended_Pictographic}/u.test(char) || (codePoint >= 0x2600 && codePoint <= 0x27BF)) {
+      hasEmoji = true;
+      continue;
+    }
+    return false;
+  }
+  return hasEmoji;
+}
+
+export function resolveTrackerButtonEmoji(button: TrackerButtonUpdate | TrackerButtonConfig, symbols: TrackerSymbolOption[]): string {
+  const emojiOverride = button.emoji_override?.trim();
+  if (emojiOverride) {
+    return emojiOverride;
+  }
+  return getTrackerSymbol(symbols, button.icon_key)?.emoji ?? '🏷️';
 }
 
 export function deriveTrackerButton(button: TrackerButtonUpdate | TrackerButtonConfig, symbols: TrackerSymbolOption[]): TrackerButtonConfig {
   const rawLabel = button.label;
   const label = rawLabel.trim() || 'Untitled';
   const symbol = getTrackerSymbol(symbols, button.icon_key);
-  const emoji = symbol?.emoji ?? '🏷️';
+  const emoji = resolveTrackerButtonEmoji(button, symbols);
 
   return {
     id: button.id,
@@ -306,6 +124,9 @@ export function deriveTrackerButton(button: TrackerButtonUpdate | TrackerButtonC
     position: button.position,
     emoji,
     title: `${emoji} ${label}`,
+    emoji_override: button.emoji_override?.trim() || null,
+    icon_kind: symbol?.icon_kind ?? 'lucide',
+    image_url: symbol?.image_url ?? null,
   };
 }
 
@@ -320,56 +141,51 @@ export function normalizeTrackerButtons(buttons: TrackerButtonConfig[], symbols:
 function createUniqueTrackerButtonId(baseId: string, existingIds: Set<string>): string {
   let candidateId = baseId;
   let suffix = 2;
-
   while (existingIds.has(candidateId)) {
     candidateId = `${baseId}_${suffix}`;
     suffix += 1;
   }
-
-  existingIds.add(candidateId);
   return candidateId;
 }
 
-export function createTrackerButtonsForPage(
-  pageIndex: number,
-  symbols: TrackerSymbolOption[],
-  existingButtons: Pick<TrackerButtonConfig, 'id'>[] = [],
-): TrackerButtonConfig[] {
-  const pageStart = pageIndex * TRACKER_BUTTONS_PER_PAGE;
-  const existingIds = new Set(existingButtons.map((button) => button.id));
-  const baseButtons =
-    pageIndex === 0
-      ? DEFAULT_TRACKER_BUTTONS
-      : pageIndex === 1
-        ? SECOND_PAGE_DEFAULT_TRACKER_BUTTONS
-        : Array.from({ length: TRACKER_BUTTONS_PER_PAGE }, (_, slotIndex) => ({
-            id: `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`,
-            label: `Other ${slotIndex + 1}`,
-            icon_key: 'help-circle',
-            color_key: 'slate',
-            position: pageStart + slotIndex,
-            emoji: '❓',
-            title: `❓ Other ${slotIndex + 1}`,
-          }));
-
-  return baseButtons.map((button, index) =>
-    deriveTrackerButton(
-      {
-        ...button,
-        id: createUniqueTrackerButtonId(button.id, existingIds),
-        position: pageStart + index,
-      },
-      symbols,
-    ),
-  );
+function pagePlaceholderButtonId(pageIndex: number, slotIndex: number) {
+  return `${PLACEHOLDER_PAGE_PREFIX}_${pageIndex + 1}_${slotIndex + 1}`;
 }
 
-export function getTrackerButtonPageCount(buttons: { position: number }[]): number {
+export function createTrackerButtonsForPage(
+  buttons: TrackerButtonConfig[],
+  pageIndex: number,
+  placeholderLabelPrefix: string,
+): TrackerButtonConfig[] {
+  const normalizedButtons = normalizeTrackerButtons(buttons, FALLBACK_SYMBOLS);
+  const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
+  const existingPageButtons = normalizedButtons.slice(start, start + TRACKER_BUTTONS_PER_PAGE);
+  const existingIds = new Set(normalizedButtons.map((button) => button.id));
+
+  const placeholders = Array.from({ length: TRACKER_BUTTONS_PER_PAGE - existingPageButtons.length }, (_, offset) => {
+    const slotIndex = existingPageButtons.length + offset;
+    const placeholderId = createUniqueTrackerButtonId(pagePlaceholderButtonId(pageIndex, slotIndex), existingIds);
+    existingIds.add(placeholderId);
+    return deriveTrackerButton(
+      {
+        id: placeholderId,
+        label: `${placeholderLabelPrefix} ${pageIndex + 1}-${slotIndex + 1}`,
+        icon_key: 'help-circle',
+        color_key: TRACKER_BUTTON_COLOR_KEYS[(start + slotIndex) % TRACKER_BUTTON_COLOR_KEYS.length],
+        position: start + slotIndex,
+      },
+      FALLBACK_SYMBOLS,
+    );
+  });
+
+  return normalizeTrackerButtons([...normalizedButtons.slice(0, start), ...existingPageButtons, ...placeholders], FALLBACK_SYMBOLS);
+}
+
+export function getTrackerButtonPageCount(buttons: TrackerButtonConfig[]): number {
   return Math.max(1, Math.ceil(buttons.length / TRACKER_BUTTONS_PER_PAGE));
 }
 
-export function getTrackerButtonsForPage<T extends { position: number }>(buttons: T[], pageIndex: number): T[] {
-  const orderedButtons = sortTrackerButtons(buttons);
+export function getTrackerButtonsForPage(buttons: TrackerButtonConfig[], pageIndex: number): TrackerButtonConfig[] {
   const start = pageIndex * TRACKER_BUTTONS_PER_PAGE;
-  return orderedButtons.slice(start, start + TRACKER_BUTTONS_PER_PAGE);
+  return sortTrackerButtons(buttons).slice(start, start + TRACKER_BUTTONS_PER_PAGE);
 }
