@@ -33,7 +33,7 @@ import ActivityButton from './components/ActivityButton';
 import TrackerSymbolIcon from './components/TrackerSymbolIcon';
 import { FALLBACK_APP_CONFIG, type AppConfig } from './appConfig';
 import Toast from './components/Toast';
-import { API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
+import { ACTIVE_TIMER_STATUS_POLL_INTERVAL_MS, API_BASE, GOOGLE_SYNC_POLL_INTERVAL_MS } from './config';
 import { THEME_PALETTE_OPTIONS, type ThemePaletteKey } from './theme';
 import {
   createTrackerButtonsForPage,
@@ -163,6 +163,15 @@ function parseEmails(input: string): string[] {
         .filter(Boolean),
     ),
   );
+}
+
+function runningActivitiesEqual(left: Record<string, number>, right: Record<string, number>) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  return leftKeys.every((key) => left[key] === right[key]);
 }
 
 function symbolSourceLabel(symbol: TrackerSymbolOption): string {
@@ -363,6 +372,8 @@ export default function App() {
   const [paletteSaveError, setPaletteSaveError] = useState<string | null>(null);
   const [showInteractionTip, setShowInteractionTip] = useState(() => localStorage.getItem(INTERACTION_TIP_STORAGE_KEY) !== 'true');
   const autoSyncInFlightRef = useRef(false);
+  const runningActivitiesRef = useRef<Record<string, number>>({});
+  const localStopInFlightRef = useRef<Set<string>>(new Set());
   const pendingLogActionRef = useRef<number | null>(null);
   const buttonsAutosaveTimeoutRef = useRef<number | null>(null);
   const paletteAutosaveTimeoutRef = useRef<number | null>(null);
@@ -638,6 +649,10 @@ export default function App() {
   }, [authHeaders, clearAuth, token]);
 
   useEffect(() => {
+    runningActivitiesRef.current = runningActivities;
+  }, [runningActivities]);
+
+  useEffect(() => {
     if (authLoading) {
       return;
     }
@@ -658,25 +673,40 @@ export default function App() {
     }
   }, [currentDraftButtonsPage, selectedButtonId]);
 
-  const refreshRunningActivities = useCallback(async () => {
+  const refreshRunningActivities = useCallback(async (options?: { showStoppedElsewhereToast?: boolean }) => {
     if (!authHeaders) {
       setRunningActivities({});
       return;
     }
 
-    const response = await axios.get<EventSummary[]>(`${API_BASE}/events`, {
+    const response = await axios.get<EventSummary[]>(`${API_BASE}/activities/active`, {
       headers: authHeaders,
     });
 
-    setRunningActivities(
-      response.data.reduce<Record<string, number>>((next, event) => {
-        if (event.is_active) {
-          next[event.type] = new Date(event.start_time).getTime();
-        }
-        return next;
-      }, {}),
-    );
-  }, [authHeaders]);
+    const nextRunningActivities = response.data.reduce<Record<string, number>>((next, event) => {
+      if (event.is_active) {
+        next[event.type] = new Date(event.start_time).getTime();
+      }
+      return next;
+    }, {});
+
+    if (options?.showStoppedElsewhereToast) {
+      const hadStoppedElsewhere = Object.keys(runningActivitiesRef.current).some(
+        (activityId) => !nextRunningActivities[activityId] && !localStopInFlightRef.current.has(activityId),
+      );
+      if (hadStoppedElsewhere) {
+        addToast('Event tracking ended on another active session.', 'info');
+      }
+    }
+
+    if (Object.keys(nextRunningActivities).length > 0) {
+      setCurrentTime(Date.now());
+    }
+
+    if (!runningActivitiesEqual(runningActivitiesRef.current, nextRunningActivities)) {
+      setRunningActivities(nextRunningActivities);
+    }
+  }, [addToast, authHeaders]);
 
   useEffect(() => {
     if (!authHeaders) {
@@ -696,8 +726,15 @@ export default function App() {
       setCurrentTime(Date.now());
     }, 1000);
 
-    return () => window.clearInterval(interval);
-  }, [runningActivities]);
+    const pollInterval = window.setInterval(() => {
+      void refreshRunningActivities({ showStoppedElsewhereToast: true });
+    }, ACTIVE_TIMER_STATUS_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(interval);
+      window.clearInterval(pollInterval);
+    };
+  }, [refreshRunningActivities, runningActivities]);
 
   const finalizePendingEvent = useCallback(async (details?: string) => {
     if (!activePendingLog || !authHeaders) {
@@ -1471,6 +1508,7 @@ export default function App() {
     }
 
     if (runningActivities[activityId]) {
+      localStopInFlightRef.current.add(activityId);
       try {
         const response = await axios.post<{
           status: 'success' | 'error';
@@ -1483,6 +1521,11 @@ export default function App() {
           { headers: authHeaders },
         );
         if (response.data.status !== 'success' || response.data.event_id === undefined || response.data.duration_seconds === undefined) {
+          await refreshRunningActivities();
+          if (response.data.message?.includes('No active timer')) {
+            addToast('Event tracking ended on another active session.', 'info');
+            return;
+          }
           addToast(response.data.message || 'Failed to stop activity', 'error');
           return;
         }
@@ -1498,6 +1541,8 @@ export default function App() {
       } catch (error) {
         addToast('Failed to stop activity', 'error');
         console.error('Stop activity error:', error);
+      } finally {
+        localStopInFlightRef.current.delete(activityId);
       }
       return;
     }
@@ -1509,6 +1554,7 @@ export default function App() {
         start_time?: string;
       }>(`${API_BASE}/activities/start`, { type: activityId }, { headers: authHeaders });
       if (response.data.status !== 'success' || !response.data.start_time) {
+        await refreshRunningActivities();
         addToast(response.data.message || 'Failed to start activity', 'error');
         return;
       }

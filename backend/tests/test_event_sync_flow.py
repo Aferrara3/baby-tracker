@@ -530,6 +530,34 @@ def test_multiple_activity_timers_can_run_concurrently_for_one_account(client: T
     assert bottle_stop.json()["status"] == "success"
 
 
+def test_active_activities_endpoint_only_returns_current_account_active_timers(client: TestClient):
+    account_one = register(client, "active-timer-1", "secret123")
+    account_two = register(client, "active-timer-2", "secret123")
+
+    headers_one = auth_headers(account_one["token"])
+    headers_two = auth_headers(account_two["token"])
+
+    sleep_start = client.post("/activities/start", headers=headers_one, json={"type": "sleep"})
+    bottle_start = client.post("/activities/start", headers=headers_one, json={"type": "bottle"})
+    assert sleep_start.status_code == 200
+    assert bottle_start.status_code == 200
+
+    stopped = client.post("/activities/stop", headers=headers_one, json={"type": "sleep"})
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "success"
+
+    other_start = client.post("/activities/start", headers=headers_two, json={"type": "diaper"})
+    assert other_start.status_code == 200
+
+    response = client.get("/activities/active", headers=headers_one)
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert [event["type"] for event in payload] == ["bottle"]
+    assert payload[0]["is_active"] is True
+    assert payload[0]["end_time"] is None
+
+
 def test_stop_syncs_started_timer_and_finalize_updates_same_calendar_event(client: TestClient):
     data = register(client, "timer-sync", "secret123")
     headers = auth_headers(data["token"])

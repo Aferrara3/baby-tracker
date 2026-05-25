@@ -9,3 +9,8 @@ export const GOOGLE_SYNC_POLL_INTERVAL_MS = parsePositiveInt(
   import.meta.env.VITE_GOOGLE_SYNC_POLL_INTERVAL_MS,
   60 * 60 * 1000,
 );
+
+export const ACTIVE_TIMER_STATUS_POLL_INTERVAL_MS = parsePositiveInt(
+  import.meta.env.VITE_ACTIVE_TIMER_STATUS_POLL_INTERVAL_MS,
+  15 * 1000,
+);

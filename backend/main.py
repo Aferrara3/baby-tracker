@@ -2018,6 +2018,18 @@ def list_events_endpoint(session_context: SessionContext = Depends(require_sessi
         return [_event_response(event, account) for event in events]
 
 
+@app.get("/activities/active", response_model=list[EventResponse])
+def list_active_activities_endpoint(session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        events = session.exec(
+            select(Event)
+            .where(Event.account_id == account.id, Event.deleted_at.is_(None), Event.is_active.is_(True))
+            .order_by(Event.start_time.desc())
+        ).all()
+        return [_event_response(event, account) for event in events]
+
+
 @app.delete("/events/day", response_model=DayActionResponse)
 def delete_events_for_day_endpoint(
     target_date: Optional[str] = None,
