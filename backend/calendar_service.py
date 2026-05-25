@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -10,7 +11,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from app_profile import get_activity_meta, get_app_profile, get_tracker_button_templates
+from app_profile import get_activity_meta, get_app_profile, get_tracker_button_templates, resolve_profile_config_path
 from config import CALENDAR_SHARE_ROLE, CALENDAR_TIME_ZONE
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,13 @@ def activity_label(activity_type: str) -> str:
     )[0]
 
 
-def _summary_type_map() -> dict[str, str]:
+def _summary_type_map_cache_key() -> tuple[str, int]:
+    profile_path = resolve_profile_config_path()
+    return str(profile_path), profile_path.stat().st_mtime_ns
+
+
+@lru_cache(maxsize=8)
+def _summary_type_map_cached(_: tuple[str, int]) -> dict[str, str]:
     summary_map: dict[str, str] = {}
     for button in get_tracker_button_templates():
         activity_type = str(button["id"])
@@ -46,15 +53,16 @@ def _summary_type_map() -> dict[str, str]:
     return summary_map
 
 
+def _summary_type_map() -> dict[str, str]:
+    return _summary_type_map_cached(_summary_type_map_cache_key())
+
+
 def infer_activity_type_from_summary(summary: Optional[str], fallback: Optional[str] = None) -> str:
     if not summary:
         return fallback or "help"
 
     normalized_summary = summary.strip()
     return normalize_activity_type(_summary_type_map().get(normalized_summary, fallback or "help"))
-
-
-ACTIVITY_META = get_activity_meta()
 
 
 class CalendarService:

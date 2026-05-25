@@ -17,8 +17,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from app_profile import get_activity_meta
 from config import CREDENTIALS_PATH, CALENDAR_ID
-from calendar_service import CalendarService, ACTIVITY_META, INSTANT_EVENT_DURATION_MINUTES
+from calendar_service import CalendarService, INSTANT_EVENT_DURATION_MINUTES
 
 LIVE_CALENDAR_TESTS_ENABLED = os.environ.get("ENABLE_LIVE_CALENDAR_TESTS") == "1"
 pytestmark = pytest.mark.skipif(
@@ -102,7 +103,7 @@ class TestCreateEvent:
 
 class TestCreateEventFromBabyEvent:
 
-    @pytest.mark.parametrize("activity_type", list(ACTIVITY_META.keys()))
+    @pytest.mark.parametrize("activity_type", list(get_activity_meta().keys()))
     def test_all_activity_types_create_event(self, svc, activity_type, created_event_ids):
         """Every known activity type should produce a calendar event."""
         now = datetime.now(timezone.utc)
@@ -116,7 +117,7 @@ class TestCreateEventFromBabyEvent:
         result = svc.create_event_from_baby_event(event_dict)
         created_event_ids.append(result["id"])
         assert result.get("id"), f"No event id returned for activity type: {activity_type}"
-        expected_label, expected_color = ACTIVITY_META[activity_type]
+        expected_label, expected_color = get_activity_meta()[activity_type]
         assert result.get("summary") == expected_label
         assert result.get("colorId") == expected_color
 

@@ -79,10 +79,27 @@ export function isValidEmojiValue(value: string): boolean {
   if (!normalized || normalized.length > 16) {
     return false;
   }
-  if (/\s/u.test(normalized)) {
+
+  let hasEmoji = false;
+  for (const char of normalized) {
+    const codePoint = char.codePointAt(0);
+    if (!codePoint) {
+      return false;
+    }
+    if (codePoint === 0x200D || codePoint === 0xFE0F || codePoint === 0xFE0E || codePoint === 0x20E3) {
+      continue;
+    }
+    if (codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF) {
+      hasEmoji = true;
+      continue;
+    }
+    if (/\p{Extended_Pictographic}/u.test(char) || (codePoint >= 0x2600 && codePoint <= 0x27BF)) {
+      hasEmoji = true;
+      continue;
+    }
     return false;
   }
-  return /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}]/u.test(normalized);
+  return hasEmoji;
 }
 
 export function resolveTrackerButtonEmoji(button: TrackerButtonUpdate | TrackerButtonConfig, symbols: TrackerSymbolOption[]): string {

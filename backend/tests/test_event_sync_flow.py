@@ -274,6 +274,24 @@ def test_custom_icon_rejects_non_emoji_calendar_value(client: TestClient):
     assert response.json()["detail"] == "Custom icon emoji must be a valid emoji"
 
 
+def test_custom_icon_rejects_svg_uploads(client: TestClient):
+    data = register(client, "custom-icons-svg", "secret123")
+    headers = auth_headers(data["token"])
+
+    response = client.post(
+        "/custom-icons",
+        headers=headers,
+        data={
+            "label": "Pizza Slice",
+            "emoji": "🍕",
+        },
+        files={"asset": ("pizza.svg", b"<svg></svg>", "image/svg+xml")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Custom icons must be uploaded as PNG"
+
+
 def test_deleting_custom_icon_removes_it_and_falls_back_existing_buttons(client: TestClient):
     data = register(client, "custom-icons-delete", "secret123")
     headers = auth_headers(data["token"])
