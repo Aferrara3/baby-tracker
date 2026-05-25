@@ -5,7 +5,6 @@ import os
 import random
 import threading
 import unicodedata
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
@@ -41,7 +40,6 @@ from calendar_service import (
 from config import (
     APP_HOST,
     APP_PORT,
-    APP_PROFILE_CONFIG_PATH,
     CALENDAR_ID,
     CORS_ALLOWED_ORIGINS,
     CREDENTIALS_PATH,
@@ -691,11 +689,9 @@ def _custom_icon_extension(upload: UploadFile) -> str:
     suffix = Path(upload.filename or "").suffix.lower()
     if content_type == "image/png" or suffix == ".png":
         return ".png"
-    if content_type == "image/svg+xml" or suffix == ".svg":
-        return ".svg"
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="Custom icons must be uploaded as PNG or SVG",
+        detail="Custom icons must be uploaded as PNG",
     )
 
 
