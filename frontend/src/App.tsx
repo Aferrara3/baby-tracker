@@ -17,6 +17,7 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   ImagePlus,
   HelpCircle,
+  InfoIcon,
   LogOut,
   Search,
   Send,
@@ -323,6 +324,103 @@ function SortableDraftButtonCard({ button, symbol, isSelected, onSelect }: Sorta
         {button.label.trim() || 'Untitled'}
       </p>
     </button>
+  );
+}
+
+function PrivacyNoticeWidget() {
+  const [isOpen, setIsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="app-icon-button fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-4 z-40 inline-flex items-center gap-2 rounded-full border px-3 py-3 shadow-lg backdrop-blur-md transition hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-bg)]"
+        aria-label="Open privacy notice"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        title="Privacy notice"
+      >
+        <InfoIcon size={18} />
+        <span className="hidden text-sm font-semibold sm:inline">Privacy</span>
+      </button>
+
+      <div
+        className={clsx(
+          'app-overlay fixed inset-0 z-[45] flex items-end px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-200',
+          isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+        )}
+        onClick={() => setIsOpen(false)}
+      >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="privacy-notice-title"
+          className={clsx(
+            'app-surface relative w-full max-w-sm rounded-3xl border p-4 pr-12 shadow-2xl transition-transform duration-200',
+            isOpen ? 'translate-y-0' : 'translate-y-8',
+          )}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => setIsOpen(false)}
+            className="app-icon-button absolute right-3 top-3 rounded-full p-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-surface)]"
+            aria-label="Close privacy notice"
+          >
+            <X size={16} />
+          </button>
+
+          <div className="space-y-3">
+            <div className="app-accent-soft inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold">
+              <InfoIcon size={14} />
+              Privacy notice
+            </div>
+            <div className="space-y-2">
+              <h2 id="privacy-notice-title" className="text-base font-semibold">
+                Casual-use app only
+              </h2>
+              <p className="app-muted text-sm leading-6">
+                This app is not enterprise-grade and comes with no guarantee of privacy, security, uptime, or data retention.
+              </p>
+              <p className="app-muted text-sm leading-6">
+                It is a project for casual or entertainment use, so please do not trust it with sensitive, regulated, or high-stakes information.
+              </p>
+              <p className="app-muted text-sm leading-6">
+                By using it, you accept the risk of data leakage, theft, loss, or other failures.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1699,6 +1797,7 @@ export default function App() {
             </div>
           ))}
         </div>
+        <PrivacyNoticeWidget />
       </div>
     );
   }
@@ -2452,6 +2551,7 @@ export default function App() {
           </div>
         ))}
       </div>
+      <PrivacyNoticeWidget />
     </div>
   );
 }
