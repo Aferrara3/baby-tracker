@@ -335,6 +335,18 @@ function PrivacyNoticeWidget() {
       return undefined;
     }
 
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsOpen(false);
@@ -350,7 +362,7 @@ function PrivacyNoticeWidget() {
       <button
         type="button"
         onClick={() => setIsOpen(true)}
-        className="app-icon-button fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-4 z-40 inline-flex items-center gap-2 rounded-full border px-3 py-3 shadow-lg backdrop-blur-md transition hover:scale-105"
+        className="app-icon-button fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-4 z-40 inline-flex items-center gap-2 rounded-full border px-3 py-3 shadow-lg backdrop-blur-md transition hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-bg)]"
         aria-label="Open privacy notice"
         aria-haspopup="dialog"
         aria-expanded={isOpen}
@@ -382,7 +394,7 @@ function PrivacyNoticeWidget() {
           <button
             type="button"
             onClick={() => setIsOpen(false)}
-            className="app-icon-button absolute right-3 top-3 rounded-full p-2 transition"
+            className="app-icon-button absolute right-3 top-3 rounded-full p-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-surface)]"
             aria-label="Close privacy notice"
           >
             <X size={16} />
