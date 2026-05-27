@@ -411,7 +411,7 @@ function PrivacyNoticeWidget() {
                 This app is not enterprise-grade and comes with no guarantee of privacy, security, uptime, or data retention.
               </p>
               <p className="app-muted text-sm leading-6">
-                It is a vibe-coded project for casual or entertainment use, so please do not trust it with sensitive, regulated, or high-stakes information.
+                It is a project for casual or entertainment use, so please do not trust it with sensitive, regulated, or high-stakes information.
               </p>
               <p className="app-muted text-sm leading-6">
                 By using it, you accept the risk of data leakage, theft, loss, or other failures.
