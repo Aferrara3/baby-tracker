@@ -350,11 +350,14 @@ function PrivacyNoticeWidget() {
       <button
         type="button"
         onClick={() => setIsOpen(true)}
-        className="app-icon-button fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-4 z-40 rounded-full border px-3 py-3 shadow-lg backdrop-blur-md transition hover:scale-105"
+        className="app-icon-button fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] left-4 z-40 inline-flex items-center gap-2 rounded-full border px-3 py-3 shadow-lg backdrop-blur-md transition hover:scale-105"
         aria-label="Open privacy notice"
+        aria-haspopup="dialog"
         aria-expanded={isOpen}
+        title="Privacy notice"
       >
         <InfoIcon size={18} />
+        <span className="hidden text-sm font-semibold sm:inline">Privacy</span>
       </button>
 
       <div
@@ -362,6 +365,8 @@ function PrivacyNoticeWidget() {
           'app-overlay fixed inset-0 z-40 flex items-end px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-200',
           isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
         )}
+        role="presentation"
+        aria-hidden={!isOpen}
         onClick={() => setIsOpen(false)}
       >
         <div
