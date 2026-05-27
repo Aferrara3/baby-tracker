@@ -374,11 +374,9 @@ function PrivacyNoticeWidget() {
 
       <div
         className={clsx(
-          'app-overlay fixed inset-0 z-40 flex items-end px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-200',
+          'app-overlay fixed inset-0 z-[45] flex items-end px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-6 transition-all duration-200',
           isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
         )}
-        role="presentation"
-        aria-hidden={!isOpen}
         onClick={() => setIsOpen(false)}
       >
         <div
