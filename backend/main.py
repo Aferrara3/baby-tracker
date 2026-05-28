@@ -1944,6 +1944,7 @@ def query_account_chat(payload: ChatQueryRequest, session_context: SessionContex
         engine=engine,
         account_id=session_context.account_id,
         account_label=account.baby_name.strip() if account.baby_name else account.username,
+        account_identifier=f"{account.id}-{account.username}",
         tracker_buttons=[button.model_dump() for button in tracker_buttons],
         messages=[message.model_dump() for message in payload.messages],
         time_zone_name=payload.time_zone,

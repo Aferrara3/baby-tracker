@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -33,6 +34,7 @@ SECURITY_DENIAL_MESSAGE = (
 UNSAFE_SQL_MESSAGE = "I could not answer that safely with the allowed read-only data tools."
 MAX_CHAT_HISTORY_MESSAGES = 8
 MAX_QUERY_ROWS = 200
+CHAT_LOG_DIR = Path(__file__).resolve().parent / "chat_logs"
 CHAT_SQL_SCOPE_PREFIX = """
 WITH scoped_events AS (
     SELECT
@@ -178,18 +180,23 @@ def answer_account_chat(
     engine: Engine,
     account_id: int,
     account_label: str,
+    account_identifier: str,
     tracker_buttons: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     time_zone_name: str | None,
 ) -> ChatOutcome:
     readiness = chat_readiness_status()
     if not readiness.ready:
-        return ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE)
+        outcome = ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE)
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"stage": "readiness"})
+        return outcome
 
     normalized_messages = _normalize_messages(messages)
     latest_user_message = next((message["content"] for message in reversed(normalized_messages) if message["role"] == "user"), "")
     if not latest_user_message:
-        return ChatOutcome(status="rejected", reply="Ask a question about your tracked data to get started.")
+        outcome = ChatOutcome(status="rejected", reply="Ask a question about your tracked data to get started.")
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"stage": "empty-question"})
+        return outcome
 
     time_zone = _resolve_time_zone(time_zone_name)
     context_snapshot = build_chat_context_snapshot(
@@ -201,17 +208,23 @@ def answer_account_chat(
     )
     decision = classify_request(messages=normalized_messages, context_snapshot=context_snapshot)
     if decision.decision == "deny_irrelevant":
-        return ChatOutcome(status="rejected", reply=IRRELEVANT_REQUEST_MESSAGE)
+        outcome = ChatOutcome(status="rejected", reply=IRRELEVANT_REQUEST_MESSAGE)
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"decision": decision.reason})
+        return outcome
     if decision.decision == "deny_security":
-        return ChatOutcome(status="rejected", reply=SECURITY_DENIAL_MESSAGE)
+        outcome = ChatOutcome(status="rejected", reply=SECURITY_DENIAL_MESSAGE)
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"decision": decision.reason})
+        return outcome
 
     deterministic_outcome = try_deterministic_answer(
         engine=engine,
         account_id=account_id,
+        normalized_messages=normalized_messages,
         latest_user_message=latest_user_message,
         time_zone=time_zone,
     )
     if deterministic_outcome is not None:
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=deterministic_outcome, metadata={"path": "deterministic"})
         return deterministic_outcome
 
     try:
@@ -238,10 +251,14 @@ def answer_account_chat(
             )
             sql = repaired_sql
     except ValueError:
-        return ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE)
+        outcome = ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE)
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "unsafe-sql"})
+        return outcome
     except Exception:
         logger.exception("Chat SQL flow failed for account %s", account_id)
-        return ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE)
+        outcome = ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE, sql=locals().get("sql"))
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "sql-flow"})
+        return outcome
 
     try:
         reply = synthesize_answer(
@@ -252,63 +269,92 @@ def answer_account_chat(
         )
     except Exception:
         logger.exception("Chat answer synthesis failed for account %s", account_id)
-        return ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE)
+        outcome = ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE, sql=sql)
+        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "synthesis"})
+        return outcome
 
-    return ChatOutcome(status="answered", reply=reply.strip() or "I could not form a useful answer from that data.", sql=sql)
+    outcome = ChatOutcome(status="answered", reply=reply.strip() or "I could not form a useful answer from that data.", sql=sql)
+    _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql"})
+    return outcome
 
 
 def try_deterministic_answer(
     *,
     engine: Engine,
     account_id: int,
+    normalized_messages: list[dict[str, str]],
     latest_user_message: str,
     time_zone: ZoneInfo,
 ) -> ChatOutcome | None:
     lowered = latest_user_message.lower()
+    subject = _infer_chat_subject(lowered, normalized_messages)
+    time_scope = _infer_time_scope(lowered, normalized_messages)
 
-    if ("poop" in lowered or "diaper_poop" in lowered) and any(token in lowered for token in {"how many", "count", "times"}):
-        days = _extract_day_window(lowered) or 7
+    if subject == "poop" and (_has_count_intent(lowered) or time_scope["kind"] in {"today", "yesterday", "days_ago"}):
+        date_filter, period_label = _time_scope_filter(time_scope, default_days=7)
         sql = (
             "SELECT COUNT(*) AS event_count "
             "FROM scoped_events "
             "WHERE type = 'diaper_poop' "
-            f"AND local_date BETWEEN days_ago_local({days}) AND current_user_local_date()"
+            f"AND {date_filter}"
         )
         rows = execute_scoped_chat_sql(engine=engine, account_id=account_id, sql=sql, time_zone=time_zone)
         count = int(rows[0].get("event_count", 0) or 0) if rows else 0
         return ChatOutcome(
             status="answered",
-            reply=f"The baby pooped {count} time{'s' if count != 1 else ''} in the last {days} day{'s' if days != 1 else ''}.",
+            reply=f"The baby pooped {count} time{'s' if count != 1 else ''} {period_label}.",
             sql=sql,
         )
 
-    if any(term in lowered for term in {"nursing", "breastfeeding"}) and any(term in lowered for term in {"how much time", "time spent", "spent", "duration"}):
-        if "today" in lowered or "so far today" in lowered:
-            sql = (
-                "SELECT COALESCE(SUM(duration), 0) AS total_duration_seconds "
-                "FROM scoped_events "
-                "WHERE type = 'breastfeeding' "
-                "AND local_date = current_user_local_date()"
-            )
-            rows = execute_scoped_chat_sql(engine=engine, account_id=account_id, sql=sql, time_zone=time_zone)
-            seconds = int(rows[0].get("total_duration_seconds", 0) or 0) if rows else 0
-            return ChatOutcome(
-                status="answered",
-                reply=f"The baby spent {_format_duration(seconds)} nursing so far today.",
-                sql=sql,
-            )
+    if subject == "nursing" and _has_breakdown_intent(lowered):
+        if time_scope["kind"] in {"all_time", "today", "yesterday", "days_ago"}:
+            time_scope = {"kind": "last_n_days", "days": 7}
+        sql = (
+            "SELECT local_date, COALESCE(SUM(duration), 0) AS total_duration_seconds "
+            "FROM scoped_events "
+            "WHERE type = 'breastfeeding' "
+            f"AND {_time_scope_filter(time_scope, default_days=7)[0]} "
+            "GROUP BY local_date "
+            "ORDER BY local_date DESC"
+        )
+        rows = execute_scoped_chat_sql(engine=engine, account_id=account_id, sql=sql, time_zone=time_zone)
+        if not rows:
+            return ChatOutcome(status="answered", reply="No nursing entries were found for that breakdown window.", sql=sql)
+        breakdown_lines = [
+            f"- {row['local_date']}: {_format_duration(int(row.get('total_duration_seconds', 0) or 0))}"
+            for row in rows
+        ]
+        _, period_label = _time_scope_filter(time_scope, default_days=7)
+        return ChatOutcome(
+            status="answered",
+            reply=f"Here is the daily nursing breakdown {period_label}:\n" + "\n".join(breakdown_lines),
+            sql=sql,
+        )
 
-    if any(term in lowered for term in {"oz", "ounce", "ounces"}) and any(term in lowered for term in {"eat", "ate", "bottle", "drank", "drink"}):
-        days = _extract_day_window(lowered)
-        if "today" in lowered:
-            date_filter = "local_date = current_user_local_date()"
-            period_label = "today"
-        elif days:
-            date_filter = f"local_date BETWEEN days_ago_local({days}) AND current_user_local_date()"
-            period_label = f"in the last {days} day{'s' if days != 1 else ''}"
-        else:
+    if subject == "nursing" and (_has_duration_intent(lowered) or time_scope["kind"] in {"today", "yesterday", "days_ago"}):
+        if time_scope["kind"] not in {"today", "yesterday", "days_ago"}:
+            time_scope = {"kind": "today", "days": None}
+        date_filter, period_label = _time_scope_filter(time_scope, default_days=1)
+        sql = (
+            "SELECT COALESCE(SUM(duration), 0) AS total_duration_seconds "
+            "FROM scoped_events "
+            "WHERE type = 'breastfeeding' "
+            f"AND {date_filter}"
+        )
+        rows = execute_scoped_chat_sql(engine=engine, account_id=account_id, sql=sql, time_zone=time_zone)
+        seconds = int(rows[0].get("total_duration_seconds", 0) or 0) if rows else 0
+        return ChatOutcome(
+            status="answered",
+            reply=f"The baby spent {_format_duration(seconds)} nursing {period_label}.",
+            sql=sql,
+        )
+
+    if subject == "bottle" and _has_amount_intent(lowered):
+        if time_scope["kind"] == "all_time":
             date_filter = "1 = 1"
             period_label = "across the logged bottle events"
+        else:
+            date_filter, period_label = _time_scope_filter(time_scope, default_days=0)
         sql = (
             "SELECT ROUND(COALESCE(SUM(COALESCE(extract_ounces(details), 1)), 0), 2) AS total_oz "
             "FROM scoped_events "
@@ -321,6 +367,81 @@ def try_deterministic_answer(
             status="answered",
             reply=f"The baby ate {total_oz:.2f} oz {period_label}.",
             sql=sql,
+        )
+
+    if any(term in lowered for term in {"show", "list"}) and "bottle" in lowered and any(term in lowered for term in {"volume", "volumes", "oz", "timestamp", "timestamps", "logged"}):
+        sql = (
+            "SELECT start_time, ROUND(COALESCE(extract_ounces(details), 1), 2) AS logged_oz, details "
+            "FROM scoped_events "
+            "WHERE type = 'bottle' "
+            "ORDER BY start_time DESC "
+            "LIMIT 20"
+        )
+        rows = execute_scoped_chat_sql(engine=engine, account_id=account_id, sql=sql, time_zone=time_zone)
+        if not rows:
+            return ChatOutcome(status="answered", reply="No bottle events with logged volumes were found.", sql=sql)
+        formatted_rows = []
+        for row in rows:
+            event_time = _parse_datetime_value(row["start_time"]).astimezone(time_zone).strftime("%b %d, %Y %I:%M %p")
+            formatted_rows.append(f"- {event_time}: {float(row['logged_oz']):.2f} oz")
+        return ChatOutcome(
+            status="answered",
+            reply="Here are the latest logged bottle events with volumes:\n" + "\n".join(formatted_rows),
+            sql=sql,
+        )
+
+    if "fun facts" in lowered and any(term in lowered for term in {"baby", "data", "tracker"}):
+        poop_rows = execute_scoped_chat_sql(
+            engine=engine,
+            account_id=account_id,
+            sql="SELECT COUNT(*) AS poop_count FROM scoped_events WHERE type = 'diaper_poop' AND local_date BETWEEN days_ago_local(7) AND current_user_local_date()",
+            time_zone=time_zone,
+        )
+        bottle_rows = execute_scoped_chat_sql(
+            engine=engine,
+            account_id=account_id,
+            sql="SELECT ROUND(COALESCE(SUM(COALESCE(extract_ounces(details), 1)), 0), 2) AS total_oz FROM scoped_events WHERE type = 'bottle' AND local_date BETWEEN days_ago_local(7) AND current_user_local_date()",
+            time_zone=time_zone,
+        )
+        nursing_rows = execute_scoped_chat_sql(
+            engine=engine,
+            account_id=account_id,
+            sql="SELECT COALESCE(SUM(duration), 0) AS total_duration_seconds FROM scoped_events WHERE type = 'breastfeeding' AND local_date = current_user_local_date()",
+            time_zone=time_zone,
+        )
+        return ChatOutcome(
+            status="answered",
+            reply=(
+                "A few fun facts from the recent baby data:\n"
+                f"- Poop logs in the last 7 days: {int(poop_rows[0].get('poop_count', 0) or 0)}\n"
+                f"- Bottle intake in the last 7 days: {float(bottle_rows[0].get('total_oz', 0) or 0):.2f} oz\n"
+                f"- Nursing time so far today: {_format_duration(int(nursing_rows[0].get('total_duration_seconds', 0) or 0))}"
+            ),
+            sql="deterministic_fun_facts",
+        )
+
+    if any(term in lowered for term in {"above", "earlier", "you said"}) and "oz" in lowered:
+        all_time_rows = execute_scoped_chat_sql(
+            engine=engine,
+            account_id=account_id,
+            sql="SELECT ROUND(COALESCE(SUM(COALESCE(extract_ounces(details), 1)), 0), 2) AS total_oz FROM scoped_events WHERE type = 'bottle' AND 1 = 1",
+            time_zone=time_zone,
+        )
+        last_7_rows = execute_scoped_chat_sql(
+            engine=engine,
+            account_id=account_id,
+            sql="SELECT ROUND(COALESCE(SUM(COALESCE(extract_ounces(details), 1)), 0), 2) AS total_oz FROM scoped_events WHERE type = 'bottle' AND local_date BETWEEN days_ago_local(7) AND current_user_local_date()",
+            time_zone=time_zone,
+        )
+        prior_assistant_oz = _extract_latest_assistant_ounces(normalized_messages)
+        return ChatOutcome(
+            status="answered",
+            reply=(
+                f"I likely mixed time windows. Right now I see {float(all_time_rows[0].get('total_oz', 0) or 0):.2f} oz across all logged bottle events "
+                f"and {float(last_7_rows[0].get('total_oz', 0) or 0):.2f} oz in the last 7 days."
+                + (f" The earlier assistant message mentioned {prior_assistant_oz:.2f} oz." if prior_assistant_oz is not None else "")
+            ),
+            sql="deterministic_discrepancy_explanation",
         )
 
     if "vit" in lowered and "next" in lowered and any(term in lowered for term in {"due", "drop", "vit d", "vitamin d"}):
@@ -458,7 +579,7 @@ def classify_request(*, messages: list[dict[str, str]], context_snapshot: dict[s
     if _contains_security_red_flag(lowered):
         return ChatDecision(decision="deny_security", reason="Matched a hard security deny rule.")
 
-    if _looks_like_app_data_question(lowered, context_snapshot):
+    if _looks_like_app_data_question(lowered, messages, context_snapshot):
         return ChatDecision(decision="allow", reason="Matched app-data question heuristics.")
 
     return ChatDecision(decision="deny_irrelevant", reason="Did not match the app-data question heuristics.")
@@ -641,8 +762,9 @@ def _contains_security_red_flag(message: str) -> bool:
     return any(flag in message for flag in red_flags)
 
 
-def _looks_like_app_data_question(message: str, context_snapshot: dict[str, Any]) -> bool:
+def _looks_like_app_data_question(message: str, messages: list[dict[str, str]], context_snapshot: dict[str, Any]) -> bool:
     analytics_terms = {
+        "how much",
         "how many",
         "count",
         "average",
@@ -713,8 +835,14 @@ def _looks_like_app_data_question(message: str, context_snapshot: dict[str, Any]
     has_analytics_signal = any(term in message for term in analytics_terms)
     has_app_signal = any(term in message for term in app_terms) or any(term in message for term in tracker_terms)
     mentions_own_data = any(term in message for term in {"my", "our", "baby", "tracker", "data"})
+    prior_app_context = any(
+        entry["role"] == "assistant" and any(term in entry["content"].lower() for term in {"bottle", "poop", "pee", "nursing", "breastfeeding", "oz", "vit d"})
+        for entry in messages
+    )
 
-    return (has_analytics_signal and has_app_signal) or (mentions_own_data and has_app_signal)
+    return (has_app_signal or prior_app_context) and (
+        has_analytics_signal or mentions_own_data or any(term in message for term in {"show", "list", "fun facts", "above", "earlier", "you said"})
+    )
 
 
 def _extract_day_window(message: str) -> int | None:
@@ -722,6 +850,126 @@ def _extract_day_window(message: str) -> int | None:
     if match:
         return int(match.group(1))
     return None
+
+
+def _has_count_intent(message: str) -> bool:
+    return any(term in message for term in {"how many", "count", "times", "how many were"})
+
+
+def _has_duration_intent(message: str) -> bool:
+    return any(term in message for term in {"how much time", "time spent", "spent", "duration"})
+
+
+def _has_amount_intent(message: str) -> bool:
+    return (
+        any(term in message for term in {"oz", "ounce", "ounces", "bottle"})
+        and any(term in message for term in {"eat", "ate", "bottle", "drank", "drink", "eaten"})
+        and any(term in message for term in {"how much", "total", "amount", "has the baby", "how much has"})
+    )
+
+
+def _has_breakdown_intent(message: str) -> bool:
+    return any(term in message for term in {"breakdown", "daily breakdown", "per day", "grouped", "group by day"})
+
+
+def _infer_chat_subject(latest_message: str, messages: list[dict[str, str]]) -> str | None:
+    explicit = _subject_from_text(latest_message)
+    if explicit is not None:
+        return explicit
+
+    for entry in reversed(messages[:-1]):
+        if entry["role"] != "user":
+            continue
+        inferred = _subject_from_text(entry["content"].lower())
+        if inferred is not None:
+            return inferred
+    return None
+
+
+def _subject_from_text(message: str) -> str | None:
+    if any(term in message for term in {"poop", "diaper_poop"}):
+        return "poop"
+    if any(term in message for term in {"nursing", "breastfeeding"}):
+        return "nursing"
+    if any(term in message for term in {"bottle", "oz", "ounce", "ounces"}):
+        return "bottle"
+    if any(term in message for term in {"vit d", "vitamin d", "drop"}) and "next" in message:
+        return "vitd"
+    return None
+
+
+def _infer_time_scope(latest_message: str, messages: list[dict[str, str]]) -> dict[str, int | str | None]:
+    if "day before yesterday" in latest_message:
+        return {"kind": "days_ago", "days": 2}
+    if "day before" in latest_message:
+        prior_scope = _infer_prior_time_scope(messages)
+        if prior_scope["kind"] == "days_ago":
+            return {"kind": "days_ago", "days": int(prior_scope["days"] or 1) + 1}
+        if prior_scope["kind"] == "yesterday":
+            return {"kind": "days_ago", "days": 2}
+        return {"kind": "days_ago", "days": 2}
+    if "yesterday" in latest_message:
+        return {"kind": "yesterday", "days": None}
+    if "today" in latest_message:
+        return {"kind": "today", "days": None}
+    if any(term in latest_message for term in {"past week", "last week", "past 7 days", "weekly"}):
+        return {"kind": "last_n_days", "days": 7}
+    days = _extract_day_window(latest_message)
+    if days is not None:
+        return {"kind": "last_n_days", "days": days}
+    if any(term in latest_message for term in {"across all", "all time", "ever", "overall"}):
+        return {"kind": "all_time", "days": None}
+
+    return _infer_prior_time_scope(messages)
+
+
+def _infer_prior_time_scope(messages: list[dict[str, str]]) -> dict[str, int | str | None]:
+    for entry in reversed(messages[:-1]):
+        if entry["role"] != "user":
+            continue
+        prior = entry["content"].lower()
+        if "day before yesterday" in prior:
+            return {"kind": "days_ago", "days": 2}
+        if "day before" in prior:
+            return {"kind": "days_ago", "days": 2}
+        if "yesterday" in prior:
+            return {"kind": "yesterday", "days": None}
+        if "today" in prior:
+            return {"kind": "today", "days": None}
+        if any(term in prior for term in {"past week", "last week", "past 7 days", "weekly"}):
+            return {"kind": "last_n_days", "days": 7}
+        prior_days = _extract_day_window(prior)
+        if prior_days is not None:
+            return {"kind": "last_n_days", "days": prior_days}
+    return {"kind": "all_time", "days": None}
+
+
+def _time_scope_filter(scope: dict[str, int | str | None], *, default_days: int) -> tuple[str, str]:
+    kind = scope["kind"]
+    if kind == "today":
+        return "local_date = current_user_local_date()", "today"
+    if kind == "yesterday":
+        return "local_date = days_ago_local(2)", "yesterday"
+    if kind == "days_ago":
+        days_ago = int(scope["days"] or 1)
+        target = days_ago + 1
+        if days_ago == 1:
+            return "local_date = days_ago_local(2)", "yesterday"
+        if days_ago == 2:
+            return f"local_date = days_ago_local({target})", "the day before yesterday"
+        return f"local_date = days_ago_local({target})", f"{days_ago} days ago"
+    if kind == "last_n_days":
+        days = int(scope["days"] or default_days or 7)
+        return (
+            f"local_date BETWEEN days_ago_local({days}) AND current_user_local_date()",
+            f"in the last {days} day{'s' if days != 1 else ''}",
+        )
+    if default_days > 0:
+        return (
+            f"local_date BETWEEN days_ago_local({default_days}) AND current_user_local_date()",
+            f"in the last {default_days} day{'s' if default_days != 1 else ''}",
+        )
+    return "1 = 1", "across the logged bottle events"
 
 
 def _format_duration(seconds: int) -> str:
@@ -742,6 +990,39 @@ def _parse_datetime_value(value: Any) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _extract_latest_assistant_ounces(messages: list[dict[str, str]]) -> float | None:
+    for message in reversed(messages):
+        if message["role"] != "assistant":
+            continue
+        match = re.search(r"(\d+(?:\.\d+)?)\s*oz", message["content"].lower())
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _safe_log_identifier(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-").lower()
+    return cleaned or "unknown-user"
+
+
+def _write_chat_log(*, account_identifier: str, messages: list[dict[str, Any]], outcome: ChatOutcome, metadata: dict[str, Any]) -> None:
+    CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    log_path = CHAT_LOG_DIR / f"{timestamp}-{_safe_log_identifier(account_identifier)}.log"
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "account_identifier": account_identifier,
+        "messages": messages,
+        "outcome": {
+            "status": outcome.status,
+            "reply": outcome.reply,
+            "sql": outcome.sql,
+        },
+        "metadata": metadata,
+    }
+    log_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
 def _tokenize_text(value: str) -> set[str]:

@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -64,13 +64,13 @@ def register(client: TestClient, username: str, password: str):
     return response.json()
 
 
-def create_event(client: TestClient, token: str, *, event_type: str, details: str | None = None):
+def create_event(client: TestClient, token: str, *, event_type: str, details: str | None = None, start_time: str | None = None):
     response = client.post(
         "/events",
         headers=auth_headers(token),
         json={
             "type": event_type,
-            "start_time": datetime.now(timezone.utc).isoformat(),
+            "start_time": start_time or datetime.now(timezone.utc).isoformat(),
             "details": details,
         },
     )
@@ -187,3 +187,148 @@ def test_execute_scoped_chat_sql_normalizes_common_non_sqlite_patterns(client: T
     )
 
     assert rows == [{"poop_count": 2}]
+
+
+def test_chat_followup_today_inherits_prior_poop_subject(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-followup-poop", "secret123")
+    now = datetime.now(timezone.utc)
+    create_event(client, auth["token"], event_type="diaper_poop", start_time=now.isoformat())
+    create_event(client, auth["token"], event_type="diaper_poop", start_time=(now - timedelta(days=1)).isoformat())
+
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+
+    response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How many times did my baby poop in the last 7 days?"},
+                {"role": "assistant", "content": "The baby pooped 2 times in the last 7 days."},
+                {"role": "user", "content": "Just today"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "answered"
+    assert response.json()["reply"] == "The baby pooped 1 time today."
+
+
+def test_chat_nursing_yesterday_uses_requested_day(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-followup-nursing", "secret123")
+    now = datetime.now(timezone.utc)
+    create_event(client, auth["token"], event_type="breastfeeding", start_time=now.isoformat())
+    create_event(
+        client,
+        auth["token"],
+        event_type="breastfeeding",
+        start_time=(now - timedelta(days=1)).isoformat(),
+    )
+
+    with main.Session(main.engine) as session:
+        events = session.exec(main.select(main.Event).where(main.Event.account_id == auth["account"]["id"])).all()
+        for event in events:
+            event_start = event.start_time.replace(tzinfo=timezone.utc) if event.start_time.tzinfo is None else event.start_time
+            if event_start.date() == now.date():
+                event.duration = 3600
+            else:
+                event.duration = 1800
+            session.add(event)
+        session.commit()
+
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+
+    response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How much time was spent nursing yesterday?"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "answered"
+    assert response.json()["reply"] == "The baby spent 30 minutes nursing yesterday."
+
+
+def test_chat_nursing_weekly_breakdown_uses_grouped_daily_response(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-nursing-breakdown", "secret123")
+    now = datetime.now(timezone.utc)
+    create_event(client, auth["token"], event_type="breastfeeding", start_time=now.isoformat())
+    create_event(client, auth["token"], event_type="breastfeeding", start_time=(now - timedelta(days=1)).isoformat())
+
+    with main.Session(main.engine) as session:
+        events = session.exec(main.select(main.Event).where(main.Event.account_id == auth["account"]["id"])).all()
+        for event in events:
+            event_start = event.start_time.replace(tzinfo=timezone.utc) if event.start_time.tzinfo is None else event.start_time
+            if event_start.date() == now.date():
+                event.duration = 3600
+            else:
+                event.duration = 1800
+            session.add(event)
+        session.commit()
+
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+
+    response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How much time was spent nursing so far today?"},
+                {"role": "assistant", "content": "The baby spent 1 hour nursing today."},
+                {"role": "user", "content": "Give me a daily breakdown for past week"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "answered"
+    assert "daily nursing breakdown in the last 7 days" in response.json()["reply"]
+    assert "- " in response.json()["reply"]
+
+
+def test_chat_followup_day_before_advances_relative_day_scope(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-day-before", "secret123")
+    now = datetime.now(timezone.utc)
+    create_event(client, auth["token"], event_type="breastfeeding", start_time=(now - timedelta(days=1)).isoformat())
+    create_event(client, auth["token"], event_type="breastfeeding", start_time=(now - timedelta(days=2)).isoformat())
+
+    with main.Session(main.engine) as session:
+        events = session.exec(main.select(main.Event).where(main.Event.account_id == auth["account"]["id"])).all()
+        for event in events:
+            event_start = event.start_time.replace(tzinfo=timezone.utc) if event.start_time.tzinfo is None else event.start_time
+            if event_start.date() == (now - timedelta(days=1)).date():
+                event.duration = 1800
+            else:
+                event.duration = 900
+            session.add(event)
+        session.commit()
+
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+
+    response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How much time was spent nursing yesterday?"},
+                {"role": "assistant", "content": "The baby spent 30 minutes nursing yesterday."},
+                {"role": "user", "content": "day before"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "answered"
+    assert response.json()["reply"] == "The baby spent 15 minutes nursing the day before yesterday."
