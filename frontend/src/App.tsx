@@ -31,6 +31,7 @@ import axios from 'axios';
 import { clsx } from 'clsx';
 
 import ActivityButton from './components/ActivityButton';
+import ChatWidget from './components/ChatWidget';
 import TrackerSymbolIcon from './components/TrackerSymbolIcon';
 import { FALLBACK_APP_CONFIG, type AppConfig } from './appConfig';
 import Toast from './components/Toast';
@@ -2551,6 +2552,7 @@ export default function App() {
           </div>
         ))}
       </div>
+      {account && authHeaders ? <ChatWidget authHeaders={authHeaders} /> : null}
       <PrivacyNoticeWidget />
     </div>
   );

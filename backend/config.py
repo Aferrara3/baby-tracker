@@ -65,3 +65,8 @@ FORCE_GCAL_QUEUE_RETRY_TEST = os.environ.get("FORCE_GCAL_QUEUE_RETRY_TEST", "").
     "yes",
     "on",
 }
+CHAT_MODEL_PROVIDER = os.environ.get("CHAT_MODEL_PROVIDER", "ollama").strip().lower() or "ollama"
+CHAT_OLLAMA_BASE_URL = os.environ.get("CHAT_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+CHAT_OLLAMA_MODEL = os.environ.get("CHAT_OLLAMA_MODEL", "gemma3:latest").strip() or "gemma3:latest"
+CHAT_OLLAMA_READY_TIMEOUT_SECONDS = float(os.environ.get("CHAT_OLLAMA_READY_TIMEOUT_SECONDS", "8"))
+CHAT_OLLAMA_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("CHAT_OLLAMA_REQUEST_TIMEOUT_SECONDS", "60"))
