@@ -181,6 +181,7 @@ def answer_account_chat(
     account_id: int,
     account_label: str,
     account_identifier: str,
+    chat_session_id: str | None,
     tracker_buttons: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     time_zone_name: str | None,
@@ -188,14 +189,26 @@ def answer_account_chat(
     readiness = chat_readiness_status()
     if not readiness.ready:
         outcome = ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE)
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"stage": "readiness"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"stage": "readiness"},
+        )
         return outcome
 
     normalized_messages = _normalize_messages(messages)
     latest_user_message = next((message["content"] for message in reversed(normalized_messages) if message["role"] == "user"), "")
     if not latest_user_message:
         outcome = ChatOutcome(status="rejected", reply="Ask a question about your tracked data to get started.")
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"stage": "empty-question"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"stage": "empty-question"},
+        )
         return outcome
 
     time_zone = _resolve_time_zone(time_zone_name)
@@ -209,11 +222,23 @@ def answer_account_chat(
     decision = classify_request(messages=normalized_messages, context_snapshot=context_snapshot)
     if decision.decision == "deny_irrelevant":
         outcome = ChatOutcome(status="rejected", reply=IRRELEVANT_REQUEST_MESSAGE)
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"decision": decision.reason})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"decision": decision.reason},
+        )
         return outcome
     if decision.decision == "deny_security":
         outcome = ChatOutcome(status="rejected", reply=SECURITY_DENIAL_MESSAGE)
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"decision": decision.reason})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"decision": decision.reason},
+        )
         return outcome
 
     deterministic_outcome = try_deterministic_answer(
@@ -224,7 +249,13 @@ def answer_account_chat(
         time_zone=time_zone,
     )
     if deterministic_outcome is not None:
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=deterministic_outcome, metadata={"path": "deterministic"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=deterministic_outcome,
+            metadata={"path": "deterministic"},
+        )
         return deterministic_outcome
 
     try:
@@ -252,12 +283,24 @@ def answer_account_chat(
             sql = repaired_sql
     except ValueError:
         outcome = ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE)
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "unsafe-sql"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"path": "llm-sql", "error": "unsafe-sql"},
+        )
         return outcome
     except Exception:
         logger.exception("Chat SQL flow failed for account %s", account_id)
         outcome = ChatOutcome(status="rejected", reply=UNSAFE_SQL_MESSAGE, sql=locals().get("sql"))
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "sql-flow"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"path": "llm-sql", "error": "sql-flow"},
+        )
         return outcome
 
     try:
@@ -270,11 +313,23 @@ def answer_account_chat(
     except Exception:
         logger.exception("Chat answer synthesis failed for account %s", account_id)
         outcome = ChatOutcome(status="unavailable", reply=MODEL_UNAVAILABLE_MESSAGE, sql=sql)
-        _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql", "error": "synthesis"})
+        _write_chat_log(
+            account_identifier=account_identifier,
+            chat_session_id=chat_session_id,
+            messages=messages,
+            outcome=outcome,
+            metadata={"path": "llm-sql", "error": "synthesis"},
+        )
         return outcome
 
     outcome = ChatOutcome(status="answered", reply=reply.strip() or "I could not form a useful answer from that data.", sql=sql)
-    _write_chat_log(account_identifier=account_identifier, messages=messages, outcome=outcome, metadata={"path": "llm-sql"})
+    _write_chat_log(
+        account_identifier=account_identifier,
+        chat_session_id=chat_session_id,
+        messages=messages,
+        outcome=outcome,
+        metadata={"path": "llm-sql"},
+    )
     return outcome
 
 
@@ -1007,13 +1062,25 @@ def _safe_log_identifier(value: str) -> str:
     return cleaned or "unknown-user"
 
 
-def _write_chat_log(*, account_identifier: str, messages: list[dict[str, Any]], outcome: ChatOutcome, metadata: dict[str, Any]) -> None:
+def _write_chat_log(
+    *,
+    account_identifier: str,
+    chat_session_id: str | None,
+    messages: list[dict[str, Any]],
+    outcome: ChatOutcome,
+    metadata: dict[str, Any],
+) -> None:
     CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    log_path = CHAT_LOG_DIR / f"{timestamp}-{_safe_log_identifier(account_identifier)}.log"
-    payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "account_identifier": account_identifier,
+    timestamp = datetime.now(timezone.utc).isoformat()
+    safe_account_identifier = _safe_log_identifier(account_identifier)
+    if chat_session_id and chat_session_id.strip():
+        log_path = CHAT_LOG_DIR / f"{_safe_log_identifier(chat_session_id)}-{safe_account_identifier}.log"
+    else:
+        fallback_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        log_path = CHAT_LOG_DIR / f"{fallback_timestamp}-{safe_account_identifier}.log"
+
+    entry = {
+        "timestamp": timestamp,
         "messages": messages,
         "outcome": {
             "status": outcome.status,
@@ -1022,6 +1089,19 @@ def _write_chat_log(*, account_identifier: str, messages: list[dict[str, Any]], 
         },
         "metadata": metadata,
     }
+    if log_path.exists():
+        payload = json.loads(log_path.read_text(encoding="utf-8"))
+        if not isinstance(payload.get("entries"), list):
+            payload["entries"] = []
+    else:
+        payload = {
+            "chat_session_id": chat_session_id,
+            "account_identifier": account_identifier,
+            "started_at": timestamp,
+            "entries": [],
+        }
+    payload["last_updated_at"] = timestamp
+    payload["entries"].append(entry)
     log_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 

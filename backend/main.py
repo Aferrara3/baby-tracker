@@ -294,6 +294,7 @@ class ChatReadinessResponse(SQLModel):
 class ChatQueryRequest(SQLModel):
     messages: list[ChatMessageInput]
     time_zone: Optional[str] = None
+    chat_session_id: Optional[str] = None
 
 
 class ChatQueryResponse(SQLModel):
@@ -1944,6 +1945,7 @@ def query_account_chat(payload: ChatQueryRequest, session_context: SessionContex
         account_id=session_context.account_id,
         account_label=account.baby_name.strip() if account.baby_name else account.username,
         account_identifier=f"{account.id}-{account.username}",
+        chat_session_id=payload.chat_session_id,
         tracker_buttons=[button.model_dump() for button in tracker_buttons],
         messages=[message.model_dump() for message in payload.messages],
         time_zone_name=payload.time_zone,

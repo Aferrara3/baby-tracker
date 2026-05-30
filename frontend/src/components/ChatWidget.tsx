@@ -54,6 +54,11 @@ export default function ChatWidget({ authHeaders }: ChatWidgetProps) {
   const [readiness, setReadiness] = useState<'unknown' | 'ready' | 'unavailable'>('unknown');
   const [modelLabel, setModelLabel] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const chatSessionIdRef = useRef(
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  );
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const lastAssistantMessage = useMemo(() => messages[messages.length - 1]?.content ?? '', [messages]);
 
@@ -178,6 +183,7 @@ export default function ChatWidget({ authHeaders }: ChatWidgetProps) {
             content: message.content,
           })),
           time_zone: BROWSER_TIME_ZONE,
+          chat_session_id: chatSessionIdRef.current,
         },
         { headers: authHeaders },
       );

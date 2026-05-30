@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -332,3 +333,51 @@ def test_chat_followup_day_before_advances_relative_day_scope(client: TestClient
     assert response.status_code == 200
     assert response.json()["status"] == "answered"
     assert response.json()["reply"] == "The baby spent 15 minutes nursing the day before yesterday."
+
+
+def test_chat_logs_append_to_one_file_per_chat_session(client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path):
+    auth = register(client, "chat-log-session", "secret123")
+    create_event(client, auth["token"], event_type="diaper_poop")
+    log_dir = tmp_path / "chat-logs"
+
+    monkeypatch.setattr(main.chat_service, "CHAT_LOG_DIR", log_dir)
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+
+    first_response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "chat_session_id": "session-123",
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How many times did my baby poop today?"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+    second_response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "chat_session_id": "session-123",
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How many times did my baby poop today?"},
+                {"role": "assistant", "content": "The baby pooped 1 time today."},
+                {"role": "user", "content": "Just today"},
+            ],
+            "time_zone": "UTC",
+        },
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+
+    log_files = list(log_dir.glob("*.log"))
+    assert len(log_files) == 1
+
+    payload = json.loads(log_files[0].read_text(encoding="utf-8"))
+    assert payload["chat_session_id"] == "session-123"
+    assert len(payload["entries"]) == 2
+    assert payload["entries"][0]["messages"][-1]["content"] == "How many times did my baby poop today?"
+    assert payload["entries"][1]["messages"][-1]["content"] == "Just today"
