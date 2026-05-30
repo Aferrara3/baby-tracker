@@ -51,6 +51,8 @@ CHAT_OLLAMA_BASE_URL=http://127.0.0.1:11434
 CHAT_OLLAMA_MODEL=gemma3:latest
 ```
 
+The beta chat launcher is shown only for usernames listed in `shared/chat-beta-whitelist.json`. The file is case-insensitive and currently ships with `RARI`.
+
 ### Frontend
 
 ```bash

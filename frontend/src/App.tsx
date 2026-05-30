@@ -31,6 +31,7 @@ import axios from 'axios';
 import { clsx } from 'clsx';
 
 import ActivityButton from './components/ActivityButton';
+import { isChatBetaEnabledForUsername } from './chatBeta';
 import ChatWidget from './components/ChatWidget';
 import TrackerSymbolIcon from './components/TrackerSymbolIcon';
 import { FALLBACK_APP_CONFIG, type AppConfig } from './appConfig';
@@ -491,6 +492,7 @@ export default function App() {
     () => (token ? { Authorization: `Bearer ${token}` } : undefined),
     [token],
   );
+  const isChatBetaEnabled = useMemo(() => isChatBetaEnabledForUsername(account?.username), [account?.username]);
   const seededDefaultButtons = useMemo(
     () => normalizeTrackerButtons(getTrackerButtonsForPage(appConfig.button_templates, 0), appConfig.available_symbols),
     [appConfig.available_symbols, appConfig.button_templates],
@@ -2552,7 +2554,7 @@ export default function App() {
           </div>
         ))}
       </div>
-      {account && authHeaders ? <ChatWidget authHeaders={authHeaders} /> : null}
+      {account && authHeaders && isChatBetaEnabled ? <ChatWidget authHeaders={authHeaders} /> : null}
       <PrivacyNoticeWidget />
     </div>
   );
