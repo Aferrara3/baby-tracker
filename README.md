@@ -12,6 +12,7 @@ Baby activity tracker with a FastAPI backend, React frontend, SQLite storage, an
 - Service-account-managed Google Calendar provisioning and sharing
 - Google Calendar write sync plus pull-based reconciliation back into SQLite
 - Quick tools to simulate a sample day and delete the current local calendar day
+- Beta "Chat with your data" backed by an Ollama model with server-side account scoping and read-only SQL analytics
 
 ## Repo layout
 
@@ -41,6 +42,16 @@ python main.py
 
 The API runs on `http://localhost:8090`.
 Local development defaults to `backend/database-dev.db`.
+
+Chat beta defaults to Ollama. Configure it in the repo root `.env` with:
+
+```bash
+CHAT_MODEL_PROVIDER=ollama
+CHAT_OLLAMA_BASE_URL=http://127.0.0.1:11434
+CHAT_OLLAMA_MODEL=gemma3:latest
+```
+
+The beta chat launcher is shown only for usernames listed in `shared/chat-beta-whitelist.json`. The file is case-insensitive and currently ships with `RARI`.
 
 ### Frontend
 
@@ -105,6 +116,9 @@ Equivalent cron entry:
   - `APP_HOST` / `APP_PORT`
   - `DB_PATH` or `DATABASE_URL`
   - `CUSTOM_ICON_STORAGE_DIR`
+  - `CHAT_MODEL_PROVIDER`
+  - `CHAT_OLLAMA_BASE_URL`
+  - `CHAT_OLLAMA_MODEL`
   - `CORS_ALLOWED_ORIGINS`
   - `GOOGLE_CREDENTIALS_PATH`
   - `FRONTEND_DIST_PATH`

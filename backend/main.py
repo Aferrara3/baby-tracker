@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import chat_service
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -277,6 +278,28 @@ class EventUpdate(SQLModel):
 
 class EventFinalize(SQLModel):
     details: Optional[str] = None
+
+
+class ChatMessageInput(SQLModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+class ChatReadinessResponse(SQLModel):
+    ready: bool
+    provider: str
+    model: str
+    detail: Optional[str] = None
+
+
+class ChatQueryRequest(SQLModel):
+    messages: list[ChatMessageInput]
+    time_zone: Optional[str] = None
+    chat_session_id: Optional[str] = None
+
+
+class ChatQueryResponse(SQLModel):
+    status: Literal["answered", "rejected", "unavailable"]
+    reply: str
 
 
 class TrackerButtonConfig(SQLModel):
@@ -1895,6 +1918,39 @@ def update_tracker_buttons(payload: TrackerButtonsUpdate, session_context: Sessi
             )
             raise
         return _tracker_buttons_response(session, account)
+
+
+@app.get("/chat/readiness", response_model=ChatReadinessResponse)
+def get_chat_readiness(session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        _load_account(session, session_context.account_id)
+
+    readiness = chat_service.chat_readiness_status()
+    return ChatReadinessResponse(
+        ready=readiness.ready,
+        provider=readiness.provider,
+        model=readiness.model,
+        detail=readiness.detail,
+    )
+
+
+@app.post("/chat/query", response_model=ChatQueryResponse)
+def query_account_chat(payload: ChatQueryRequest, session_context: SessionContext = Depends(require_session)):
+    with Session(engine) as session:
+        account = _load_account(session, session_context.account_id)
+        tracker_buttons = _get_tracker_buttons(session, account)
+
+    outcome = chat_service.answer_account_chat(
+        engine=engine,
+        account_id=session_context.account_id,
+        account_label=account.baby_name.strip() if account.baby_name else account.username,
+        account_identifier=f"{account.id}-{account.username}",
+        chat_session_id=payload.chat_session_id,
+        tracker_buttons=[button.model_dump() for button in tracker_buttons],
+        messages=[message.model_dump() for message in payload.messages],
+        time_zone_name=payload.time_zone,
+    )
+    return ChatQueryResponse(status=outcome.status, reply=outcome.reply)
 
 
 @app.post("/calendar/enable-sync", response_model=AccountResponse)
