@@ -282,8 +282,7 @@ class EventFinalize(SQLModel):
 
 class ChatMessageInput(SQLModel):
     role: Literal["user", "assistant"]
-    content: str
-
+    content: str = Field(min_length=1, max_length=2000)
 
 class ChatReadinessResponse(SQLModel):
     ready: bool
