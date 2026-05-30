@@ -1810,8 +1810,21 @@ export default function App() {
       <header className="app-header sticky top-0 inset-x-0 z-10 shrink-0 border-b px-4 py-3 backdrop-blur-md">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">{appConfig.app_name}</h1>
+            <div className="flex flex-wrap items-start gap-2">
+              <a
+                href={location.pathname + location.search + location.hash}
+                aria-label="Reload page"
+                className="block min-w-0 rounded-xl cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-bg)]"
+              >
+                <div className="min-w-0">
+                  <h1 className="app-title bg-clip-text text-xl font-bold text-transparent">
+                    {appConfig.app_name}
+                  </h1>
+                  <p className="app-muted mt-1 text-xs">
+                    {headerContextText}
+                  </p>
+                </div>
+              </a>
               {displayedTrackerPageCount > 1 && (
                 <div className="inline-flex items-center gap-1">
                   {Array.from({ length: displayedTrackerPageCount }, (_, pageIndex) => (
@@ -1831,11 +1844,6 @@ export default function App() {
                   ))}
                 </div>
               )}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <p className="app-muted text-xs">
-                {headerContextText}
-              </p>
               <button
                 type="button"
                 onClick={() => {
@@ -1843,7 +1851,7 @@ export default function App() {
                   setActiveView('settings');
                 }}
                 className={clsx(
-                  'app-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition',
+                  'app-status-pill ml-auto inline-flex shrink-0 self-center items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition',
                   account.calendar_connected ? 'app-status-pill-connected' : 'app-status-pill-local',
                 )}
                 aria-label="Open calendar settings"
