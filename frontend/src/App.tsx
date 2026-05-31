@@ -1466,7 +1466,11 @@ export default function App() {
     setIsBusy(true);
     try {
       await saveSettingsRequest();
-      const response = await axios.post<Account>(`${API_BASE}/calendar/enable-sync`, {}, { headers: authHeaders });
+      const response = await axios.post<Account>(
+        `${API_BASE}/calendar/enable-sync`,
+        { time_zone: BROWSER_TIME_ZONE },
+        { headers: authHeaders },
+      );
       setAccount(response.data);
       addToast('Calendar sync enabled', 'success');
     } catch (error) {

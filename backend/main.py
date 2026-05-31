@@ -42,6 +42,7 @@ from config import (
     APP_HOST,
     APP_PORT,
     CALENDAR_ID,
+    CALENDAR_TIME_ZONE,
     CORS_ALLOWED_ORIGINS,
     CREDENTIALS_PATH,
     CUSTOM_ICON_STORAGE_DIR,
@@ -297,6 +298,10 @@ class ChatQueryRequest(SQLModel):
     chat_session_id: Optional[str] = None
 
 
+class CalendarEnableSyncRequest(SQLModel):
+    time_zone: Optional[str] = None
+
+
 class ChatQueryResponse(SQLModel):
     status: Literal["answered", "rejected", "unavailable"]
     reply: str
@@ -507,6 +512,13 @@ def _resolve_time_zone(time_zone_name: Optional[str]):
                 detail="Unknown time_zone value",
             ) from exc
     return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _calendar_time_zone_name(time_zone_name: Optional[str]) -> str:
+    if not time_zone_name:
+        return CALENDAR_TIME_ZONE
+    resolved = _resolve_time_zone(time_zone_name)
+    return getattr(resolved, "key", time_zone_name)
 
 
 def _calendar_description(account: Account) -> str:
@@ -1954,17 +1966,35 @@ def query_account_chat(payload: ChatQueryRequest, session_context: SessionContex
 
 
 @app.post("/calendar/enable-sync", response_model=AccountResponse)
-def enable_calendar_sync(session_context: SessionContext = Depends(require_session)):
+def enable_calendar_sync(
+    payload: Optional[CalendarEnableSyncRequest] = None,
+    session_context: SessionContext = Depends(require_session),
+):
     with Session(engine) as session:
         account = _load_account(session, session_context.account_id)
         share_emails = _get_share_emails(session, account.id)
+        calendar_time_zone = _calendar_time_zone_name(payload.time_zone if payload else None)
 
         if account.google_calendar_id and account.service_managed_calendar:
+            metadata_updated = False
+            if payload and payload.time_zone:
+                calendar = get_calendar_service().update_calendar_metadata(
+                    calendar_id=account.google_calendar_id,
+                    summary=_calendar_summary(account),
+                    description=_calendar_description(account),
+                    time_zone=calendar_time_zone,
+                )
+                account.google_calendar_summary = calendar.get("summary", account.google_calendar_summary)
+                account.updated_at = datetime.now(timezone.utc)
+                session.add(account)
+                metadata_updated = True
             for email in share_emails:
                 get_calendar_service().share_calendar(account.google_calendar_id, email)
             if share_emails:
                 account.calendar_shared_at = datetime.now(timezone.utc)
+                account.updated_at = datetime.now(timezone.utc)
                 session.add(account)
+            if share_emails or metadata_updated:
                 session.commit()
                 session.refresh(account)
             return _account_response(session, account)
@@ -1972,6 +2002,7 @@ def enable_calendar_sync(session_context: SessionContext = Depends(require_sessi
         calendar = get_calendar_service().create_calendar(
             summary=_calendar_summary(account),
             description=_calendar_description(account),
+            time_zone=calendar_time_zone,
         )
         account.google_calendar_id = calendar["id"]
         account.google_calendar_summary = calendar.get("summary") or _calendar_summary(account)
