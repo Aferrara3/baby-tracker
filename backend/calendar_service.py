@@ -21,6 +21,12 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 INSTANT_EVENT_DURATION_MINUTES = 5
 
 
+def _event_datetime_payload(value: datetime) -> dict[str, str]:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return {"dateTime": value.isoformat()}
+
+
 def normalize_activity_type(activity_type: str) -> str:
     return get_app_profile().type_aliases.get(activity_type, activity_type)
 
@@ -165,8 +171,8 @@ class CalendarService:
 
         body: dict = {
             "summary": title or label,
-            "start": {"dateTime": start_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
-            "end": {"dateTime": end_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
+            "start": _event_datetime_payload(start_time),
+            "end": _event_datetime_payload(end_time),
         }
         if description:
             body["description"] = description
@@ -189,8 +195,8 @@ class CalendarService:
                 raise ValueError("summary, start_time, and end_time are required when body is not provided")
             body = {
                 "summary": summary,
-                "start": {"dateTime": start_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
-                "end": {"dateTime": end_time.isoformat(), "timeZone": CALENDAR_TIME_ZONE},
+                "start": _event_datetime_payload(start_time),
+                "end": _event_datetime_payload(end_time),
             }
             if description:
                 body["description"] = description

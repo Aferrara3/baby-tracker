@@ -609,7 +609,11 @@ def test_enable_sync_provisions_calendar_and_shares_to_saved_emails(client: Test
     )
     assert settings.status_code == 200
 
-    enabled = client.post("/calendar/enable-sync", headers=auth_headers(token))
+    enabled = client.post(
+        "/calendar/enable-sync",
+        headers=auth_headers(token),
+        json={"time_zone": "America/Los_Angeles"},
+    )
     assert enabled.status_code == 200
     payload = enabled.json()
 
@@ -619,6 +623,7 @@ def test_enable_sync_provisions_calendar_and_shares_to_saved_emails(client: Test
 
     fake_service = main.get_calendar_service()
     assert len(fake_service.created_calendars) == 1
+    assert fake_service.created_calendars[0]["timeZone"] == "America/Los_Angeles"
     assert {row["email"] for row in fake_service.shared_calendars} == {"mom@example.com", "dad@example.com"}
 
 
@@ -742,6 +747,29 @@ def test_updating_settings_renames_service_managed_calendar(client: TestClient):
 
     fake_service = main.get_calendar_service()
     assert fake_service.updated_calendars[-1]["summary"] == "Baby Tracker - New Baby"
+
+
+def test_enable_sync_updates_existing_service_managed_calendar_time_zone(client: TestClient):
+    data = register(client, "timezone-user", "secret123", baby_name="Milo")
+    token = data["token"]
+
+    enabled = client.post(
+        "/calendar/enable-sync",
+        headers=auth_headers(token),
+        json={"time_zone": "UTC"},
+    )
+    assert enabled.status_code == 200
+
+    updated = client.post(
+        "/calendar/enable-sync",
+        headers=auth_headers(token),
+        json={"time_zone": "America/New_York"},
+    )
+    assert updated.status_code == 200
+
+    fake_service = main.get_calendar_service()
+    assert fake_service.updated_calendars[-1]["id"] == "calendar-1"
+    assert fake_service.updated_calendars[-1]["timeZone"] == "America/New_York"
 
 
 def test_reshare_replays_acl_entries(client: TestClient):
