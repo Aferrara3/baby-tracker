@@ -1730,6 +1730,13 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [activePendingLog, handleInputDismiss, inputValue]);
 
+  useEffect(() => {
+    if (!activePendingLog) {
+      window.scrollTo(0, 0);
+      document.body.scrollTo(0, 0);
+    }
+  }, [activePendingLog]);
+
   if (!appConfigLoaded || authLoading) {
     return <div className="app-shell min-h-screen grid place-items-center app-muted">Loading…</div>;
   }
@@ -2522,6 +2529,10 @@ export default function App() {
                 placeholder={`Add note for ${pendingActivityLabel}...`}
                 className="app-input app-focus min-w-0 flex-1 rounded-xl border px-4 py-3 text-base outline-none"
                 autoFocus={Boolean(activePendingLog)}
+                onBlur={() => {
+                  window.scrollTo(0, 0);
+                  document.body.scrollTo(0, 0);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     void handleInputSubmit();
