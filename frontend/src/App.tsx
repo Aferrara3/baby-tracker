@@ -2337,13 +2337,13 @@ export default function App() {
                               value={customIconDraft.label}
                               onChange={(event) => setCustomIconDraft((current) => ({ ...current, label: event.target.value }))}
                               placeholder="Icon label"
-                              className="app-input app-focus rounded-2xl border px-4 py-3"
+                              className="app-input app-focus w-full min-w-0 rounded-2xl border px-4 py-3"
                             />
                             <input
                               value={customIconDraft.emoji}
                               onChange={(event) => setCustomIconDraft((current) => ({ ...current, emoji: event.target.value }))}
                               placeholder="Emoji"
-                              className="app-input app-focus rounded-2xl border px-4 py-3"
+                              className="app-input app-focus w-full min-w-0 rounded-2xl border px-4 py-3"
                             />
                             {customIconDraft.emoji && !isValidEmojiValue(customIconDraft.emoji) && (
                               <p className="text-sm text-rose-600 dark:text-rose-400">Enter a real emoji for calendar titles.</p>
@@ -2352,14 +2352,14 @@ export default function App() {
                               value={customIconDraft.keywords}
                               onChange={(event) => setCustomIconDraft((current) => ({ ...current, keywords: event.target.value }))}
                               placeholder="Keywords (comma separated)"
-                              className="app-input app-focus rounded-2xl border px-4 py-3 sm:col-span-2"
+                              className="app-input app-focus w-full min-w-0 rounded-2xl border px-4 py-3 sm:col-span-2"
                             />
                             <label className="app-surface flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-medium sm:col-span-2">
                               <input
                                 type="file"
                                 accept=".png,image/png,.svg,image/svg+xml"
                                 onChange={(event) => void handleCustomIconFileChange(event.target.files?.[0] ?? null)}
-                                className="block flex-1 text-sm"
+                                className="block w-full min-w-0 flex-1 text-sm"
                               />
                             </label>
                             <label className="app-muted flex items-center gap-2 text-sm sm:col-span-2">
