@@ -21,10 +21,13 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 INSTANT_EVENT_DURATION_MINUTES = 5
 
 
-def _event_datetime_payload(value: datetime) -> dict[str, str]:
+def _event_datetime_payload(value: datetime, time_zone: Optional[str] = None) -> dict[str, str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return {"dateTime": value.isoformat()}
+    payload = {"dateTime": value.isoformat()}
+    if time_zone:
+        payload["timeZone"] = time_zone
+    return payload
 
 
 def normalize_activity_type(activity_type: str) -> str:
@@ -78,6 +81,18 @@ class CalendarService:
         self.credentials_path = credentials_path
         self.calendar_id = calendar_id
         self._service = None
+        self._timezone_cache: dict[str, str] = {}
+
+    def get_calendar_timezone(self, calendar_id: str) -> str:
+        if calendar_id not in self._timezone_cache:
+            try:
+                service = self._get_service()
+                cal = service.calendars().get(calendarId=calendar_id).execute()
+                self._timezone_cache[calendar_id] = cal.get("timeZone", "UTC")
+            except Exception as e:
+                logger.warning("Could not fetch timezone for calendar %s: %s", calendar_id, e)
+                self._timezone_cache[calendar_id] = "UTC"
+        return self._timezone_cache[calendar_id]
 
     def create_event_from_baby_event(self, event, calendar_id: Optional[str] = None) -> dict:
         if isinstance(event, dict):
@@ -95,6 +110,8 @@ class CalendarService:
             duration = getattr(event, "duration", None)
             details = getattr(event, "details", None)
 
+        time_zone = self.get_calendar_timezone(calendar_id) if calendar_id else None
+
         body = self.build_event_body(
             event_type=event_type,
             title=title,
@@ -102,6 +119,7 @@ class CalendarService:
             end_time=end_time,
             duration=duration,
             details=details,
+            time_zone=time_zone,
         )
         return self.create_event(body=body, calendar_id=calendar_id)
 
@@ -121,6 +139,8 @@ class CalendarService:
             duration = getattr(event, "duration", None)
             details = getattr(event, "details", None)
 
+        time_zone = self.get_calendar_timezone(calendar_id) if calendar_id else None
+
         body = self.build_event_body(
             event_type=event_type,
             title=title,
@@ -128,6 +148,7 @@ class CalendarService:
             end_time=end_time,
             duration=duration,
             details=details,
+            time_zone=time_zone,
         )
         return self.update_event(calendar_event_id=calendar_event_id, body=body, calendar_id=calendar_id)
 
@@ -139,6 +160,7 @@ class CalendarService:
         end_time: Optional[datetime] = None,
         duration: Optional[int] = None,
         details: Optional[str] = None,
+        time_zone: Optional[str] = None,
     ) -> dict:
         normalized_type = normalize_activity_type(event_type)
         profile = get_app_profile()
@@ -171,8 +193,8 @@ class CalendarService:
 
         body: dict = {
             "summary": title or label,
-            "start": _event_datetime_payload(start_time),
-            "end": _event_datetime_payload(end_time),
+            "start": _event_datetime_payload(start_time, time_zone=time_zone),
+            "end": _event_datetime_payload(end_time, time_zone=time_zone),
         }
         if description:
             body["description"] = description
