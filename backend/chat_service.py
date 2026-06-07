@@ -99,6 +99,16 @@ def _few_shot_sql_examples() -> list[dict[str, Any]]:
             "notes": "Use local_date for local-day windows and the normalized diaper_poop type id.",
         },
         {
+            "question": "How many times did my baby poop this week?",
+            "sql": (
+                "SELECT COUNT(*) AS poop_count "
+                "FROM scoped_events "
+                "WHERE type = 'diaper_poop' "
+                "AND local_date BETWEEN current_user_local_week_start() AND current_user_local_date()"
+            ),
+            "notes": "For this-week questions, use the user-local week start helper instead of UTC or a rolling 7-day window.",
+        },
+        {
             "question": "How much time was spent nursing so far today?",
             "sql": (
                 "SELECT COALESCE(SUM(duration), 0) AS total_duration_seconds "
@@ -386,10 +396,18 @@ def try_deterministic_answer(
             sql=sql,
         )
 
-    if subject == "nursing" and (_has_duration_intent(lowered) or time_scope["kind"] in {"today", "yesterday", "days_ago"}):
-        if time_scope["kind"] not in {"today", "yesterday", "days_ago"}:
+    if subject == "nursing" and (
+        _has_duration_intent(lowered)
+        or time_scope["kind"] in {"today", "yesterday", "days_ago", "last_n_days", "this_week", "last_week", "all_time"}
+    ):
+        if time_scope["kind"] == "all_time":
+            date_filter = "1 = 1"
+            period_label = "across the logged nursing events"
+        elif time_scope["kind"] in {"today", "yesterday", "days_ago", "last_n_days", "this_week", "last_week"}:
+            date_filter, period_label = _time_scope_filter(time_scope, default_days=1)
+        else:
             time_scope = {"kind": "today", "days": None}
-        date_filter, period_label = _time_scope_filter(time_scope, default_days=1)
+            date_filter, period_label = _time_scope_filter(time_scope, default_days=1)
         sql = (
             "SELECT COALESCE(SUM(duration), 0) AS total_duration_seconds "
             "FROM scoped_events "
@@ -621,6 +639,7 @@ def build_chat_context_snapshot(
                 "user_local_date(start_time)",
                 "days_ago_local(n)",
                 "current_user_local_date()",
+                "current_user_local_week_start()",
                 "current_utc_timestamp()",
             ],
         },
@@ -659,6 +678,7 @@ def generate_sql_query(*, messages: list[dict[str, str]], context_snapshot: dict
         "- Never use PRAGMA, INSERT, UPDATE, DELETE, DROP, ALTER, ATTACH, DETACH, CREATE, REPLACE, or comments.\n"
         "- This is SQLite, not MySQL or Postgres.\n"
         "- Use local_date or user_local_date(start_time) and current_user_local_date() for user-local calendar-day logic.\n"
+        "- Use current_user_local_week_start() for local calendar-week questions like this week.\n"
         "- For relative local-day ranges, use days_ago_local(7) instead of INTERVAL syntax.\n"
         "- Use extract_ounces(details) for bottle-ounce parsing.\n"
         "- For ounce totals when notes are missing, default each relevant event to 1 by using COALESCE(extract_ounces(details), 1).\n"
@@ -697,7 +717,7 @@ def repair_sql_query(
             "- Return one single SELECT or WITH query with no semicolon.\n"
             "- Query ONLY scoped_events.\n"
             "- Use SQLite syntax only.\n"
-            "- Prefer local_date or days_ago_local(n) over INTERVAL syntax.\n"
+            "- Prefer local_date, current_user_local_week_start(), or days_ago_local(n) over INTERVAL syntax.\n"
             "- Do not use raw tables or mutate data.\n"
             "- Reuse the few_shot_examples in the provided context when choosing idiomatic SQLite patterns."
         ),
@@ -755,6 +775,7 @@ def execute_scoped_chat_sql(
         connection.create_function("user_local_date", 1, lambda value: _user_local_date(value, time_zone))
         connection.create_function("days_ago_local", 1, lambda value: _days_ago_local(value, time_zone))
         connection.create_function("current_user_local_date", 0, lambda: datetime.now(time_zone).date().isoformat())
+        connection.create_function("current_user_local_week_start", 0, lambda: _current_user_local_week_start(time_zone))
         connection.create_function("current_utc_timestamp", 0, lambda: datetime.now(timezone.utc).isoformat())
         cursor = connection.cursor()
         cursor.execute(final_sql, {"account_id": account_id, "row_limit": MAX_QUERY_ROWS})
@@ -967,7 +988,11 @@ def _infer_time_scope(latest_message: str, messages: list[dict[str, str]]) -> di
         return {"kind": "yesterday", "days": None}
     if "today" in latest_message:
         return {"kind": "today", "days": None}
-    if any(term in latest_message for term in {"past week", "last week", "past 7 days", "weekly"}):
+    if any(term in latest_message for term in {"this week", "so far this week", "week to date"}):
+        return {"kind": "this_week", "days": None}
+    if "last week" in latest_message:
+        return {"kind": "last_week", "days": None}
+    if any(term in latest_message for term in {"past week", "past 7 days", "weekly"}):
         return {"kind": "last_n_days", "days": 7}
     days = _extract_day_window(latest_message)
     if days is not None:
@@ -991,7 +1016,11 @@ def _infer_prior_time_scope(messages: list[dict[str, str]]) -> dict[str, int | s
             return {"kind": "yesterday", "days": None}
         if "today" in prior:
             return {"kind": "today", "days": None}
-        if any(term in prior for term in {"past week", "last week", "past 7 days", "weekly"}):
+        if any(term in prior for term in {"this week", "so far this week", "week to date"}):
+            return {"kind": "this_week", "days": None}
+        if "last week" in prior:
+            return {"kind": "last_week", "days": None}
+        if any(term in prior for term in {"past week", "past 7 days", "weekly"}):
             return {"kind": "last_n_days", "days": 7}
         prior_days = _extract_day_window(prior)
         if prior_days is not None:
@@ -1013,6 +1042,16 @@ def _time_scope_filter(scope: dict[str, int | str | None], *, default_days: int)
         if days_ago == 2:
             return f"local_date = days_ago_local({target})", "the day before yesterday"
         return f"local_date = days_ago_local({target})", f"{days_ago} days ago"
+    if kind == "this_week":
+        return (
+            "local_date BETWEEN current_user_local_week_start() AND current_user_local_date()",
+            "this week",
+        )
+    if kind == "last_week":
+        return (
+            "local_date BETWEEN date(current_user_local_week_start(), '-7 day') AND date(current_user_local_week_start(), '-1 day')",
+            "last week",
+        )
     if kind == "last_n_days":
         days = int(scope["days"] or default_days or 7)
         return (
@@ -1171,6 +1210,12 @@ def _days_ago_local(value: Any, time_zone: ZoneInfo) -> str:
     else:
         offset = days - 1
     return datetime.now(time_zone).date().fromordinal(datetime.now(time_zone).date().toordinal() - offset).isoformat()
+
+
+def _current_user_local_week_start(time_zone: ZoneInfo) -> str:
+    today = datetime.now(time_zone).date()
+    days_since_sunday = (today.weekday() + 1) % 7
+    return (today - timedelta(days=days_since_sunday)).isoformat()
 
 
 def _normalize_sql_dialect(sql: str) -> str:

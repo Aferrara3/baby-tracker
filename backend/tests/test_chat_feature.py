@@ -83,6 +83,17 @@ def ready_status():
     return main.chat_service.ChatReadiness(ready=True, provider="ollama", model="gemma3:latest", detail=None)
 
 
+class FixedDateTime(datetime):
+    fixed_now = datetime(2025, 6, 4, 18, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        current = cls.fixed_now
+        if tz is None:
+            return current.replace(tzinfo=None)
+        return current.astimezone(tz)
+
+
 def test_chat_readiness_requires_auth(client: TestClient):
     response = client.get("/chat/readiness")
 
@@ -217,6 +228,55 @@ def test_chat_followup_today_inherits_prior_poop_subject(client: TestClient, mon
     assert response.json()["reply"] == "The baby pooped 1 time today."
 
 
+def test_chat_today_and_yesterday_use_requested_local_timezone(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-local-boundary", "secret123")
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+    FixedDateTime.fixed_now = datetime(2025, 6, 1, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(main.chat_service, "datetime", FixedDateTime)
+
+    create_event(
+        client,
+        auth["token"],
+        event_type="diaper_poop",
+        start_time="2025-06-01T06:30:00+00:00",
+    )
+    create_event(
+        client,
+        auth["token"],
+        event_type="diaper_poop",
+        start_time="2025-06-01T07:30:00+00:00",
+    )
+
+    today_response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How many times did my baby poop today?"},
+            ],
+            "time_zone": "America/Los_Angeles",
+        },
+    )
+
+    yesterday_response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How many times did my baby poop yesterday?"},
+            ],
+            "time_zone": "America/Los_Angeles",
+        },
+    )
+
+    assert today_response.status_code == 200
+    assert today_response.json()["reply"] == "The baby pooped 1 time today."
+    assert yesterday_response.status_code == 200
+    assert yesterday_response.json()["reply"] == "The baby pooped 1 time yesterday."
+
+
 def test_chat_nursing_yesterday_uses_requested_day(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     auth = register(client, "chat-followup-nursing", "secret123")
     now = datetime.now(timezone.utc)
@@ -256,6 +316,59 @@ def test_chat_nursing_yesterday_uses_requested_day(client: TestClient, monkeypat
     assert response.status_code == 200
     assert response.json()["status"] == "answered"
     assert response.json()["reply"] == "The baby spent 30 minutes nursing yesterday."
+
+
+def test_chat_nursing_this_week_uses_local_sunday_week_start(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    auth = register(client, "chat-this-week", "secret123")
+    monkeypatch.setattr(main.chat_service, "chat_readiness_status", ready_status)
+    FixedDateTime.fixed_now = datetime(2025, 6, 4, 18, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(main.chat_service, "datetime", FixedDateTime)
+
+    create_event(
+        client,
+        auth["token"],
+        event_type="breastfeeding",
+        start_time="2025-06-01T16:00:00+00:00",
+    )
+    create_event(
+        client,
+        auth["token"],
+        event_type="breastfeeding",
+        start_time="2025-06-04T15:00:00+00:00",
+    )
+    create_event(
+        client,
+        auth["token"],
+        event_type="breastfeeding",
+        start_time="2025-05-31T18:00:00+00:00",
+    )
+
+    with main.Session(main.engine) as session:
+        events = session.exec(main.select(main.Event).where(main.Event.account_id == auth["account"]["id"])).all()
+        for event in events:
+            event_start = event.start_time.replace(tzinfo=timezone.utc) if event.start_time.tzinfo is None else event.start_time
+            if event_start.isoformat().startswith("2025-05-31T18:00:00"):
+                event.duration = 900
+            else:
+                event.duration = 1800
+            session.add(event)
+        session.commit()
+
+    response = client.post(
+        "/chat/query",
+        headers=auth_headers(auth["token"]),
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Ask about your tracked data."},
+                {"role": "user", "content": "How much time was spent nursing this week?"},
+            ],
+            "time_zone": "America/Los_Angeles",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "answered"
+    assert response.json()["reply"] == "The baby spent 1 hour nursing this week."
 
 
 def test_chat_nursing_weekly_breakdown_uses_grouped_daily_response(client: TestClient, monkeypatch: pytest.MonkeyPatch):

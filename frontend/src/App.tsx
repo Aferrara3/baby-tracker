@@ -1730,6 +1730,13 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [activePendingLog, handleInputDismiss, inputValue]);
 
+  useEffect(() => {
+    if (!activePendingLog) {
+      window.scrollTo(0, 0);
+      document.body.scrollTo(0, 0);
+    }
+  }, [activePendingLog]);
+
   if (!appConfigLoaded || authLoading) {
     return <div className="app-shell min-h-screen grid place-items-center app-muted">Loading…</div>;
   }
@@ -1848,21 +1855,6 @@ export default function App() {
                   ))}
                 </div>
               )}
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsTab('calendar');
-                  setActiveView('settings');
-                }}
-                className={clsx(
-                  'app-status-pill ml-auto inline-flex shrink-0 self-center items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold transition',
-                  account.calendar_connected ? 'app-status-pill-connected' : 'app-status-pill-local',
-                )}
-                aria-label="Open calendar settings"
-              >
-                <ShieldCheck size={12} />
-                {account.calendar_connected ? 'Sync active' : 'Local only'}
-              </button>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -2537,6 +2529,10 @@ export default function App() {
                 placeholder={`Add note for ${pendingActivityLabel}...`}
                 className="app-input app-focus min-w-0 flex-1 rounded-xl border px-4 py-3 text-base outline-none"
                 autoFocus={Boolean(activePendingLog)}
+                onBlur={() => {
+                  window.scrollTo(0, 0);
+                  document.body.scrollTo(0, 0);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     void handleInputSubmit();
@@ -2566,8 +2562,28 @@ export default function App() {
           </div>
         ))}
       </div>
-      {account && authHeaders && isChatBetaEnabled ? <ChatWidget authHeaders={authHeaders} /> : null}
-      <PrivacyNoticeWidget />
+      {activeView === 'tracker' && (
+        <div className="fixed bottom-6 inset-x-0 flex justify-center z-40 pointer-events-none pb-[env(safe-area-inset-bottom)]">
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsTab('calendar');
+              setActiveView('settings');
+            }}
+            className={clsx(
+              'pointer-events-auto app-status-pill inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition shadow-sm border',
+              account.calendar_connected ? 'app-status-pill-connected border-emerald-200/20' : 'app-status-pill-local border-orange-200/20',
+            )}
+            aria-label="Open calendar settings"
+          >
+            <ShieldCheck size={14} />
+            {account.calendar_connected ? 'Sync active' : 'Local only'}
+          </button>
+        </div>
+      )}
+
+      {activeView === 'tracker' && account && authHeaders && isChatBetaEnabled ? <ChatWidget authHeaders={authHeaders} /> : null}
+      {activeView === 'tracker' && <PrivacyNoticeWidget />}
     </div>
   );
 }

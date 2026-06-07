@@ -65,3 +65,33 @@ def test_build_event_body_uses_datetime_offsets_without_forcing_event_timezone(m
 
     assert body["start"] == {"dateTime": start_time.isoformat()}
     assert body["end"] == {"dateTime": end_time.isoformat()}
+
+def test_build_event_body_respects_time_zone_if_provided(monkeypatch):
+    monkeypatch.setattr(
+        calendar_service,
+        "get_activity_meta",
+        lambda: {"feed": ("Feed", "2")},
+    )
+    monkeypatch.setattr(
+        calendar_service,
+        "get_app_profile",
+        lambda: SimpleNamespace(
+            type_aliases={},
+            unknown_activity_color_id="1",
+            unknown_activity_emoji="?",
+        ),
+    )
+
+    service = calendar_service.CalendarService("fake-creds.json")
+    start_time = datetime(2025, 6, 1, 10, 0, tzinfo=timezone.utc)
+    end_time = datetime(2025, 6, 1, 10, 30, tzinfo=timezone.utc)
+
+    body = service.build_event_body(
+        event_type="feed",
+        start_time=start_time,
+        end_time=end_time,
+        time_zone="America/Chicago",
+    )
+
+    assert body["start"] == {"dateTime": start_time.isoformat(), "timeZone": "America/Chicago"}
+    assert body["end"] == {"dateTime": end_time.isoformat(), "timeZone": "America/Chicago"}
