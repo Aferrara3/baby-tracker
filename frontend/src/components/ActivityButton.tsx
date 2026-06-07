@@ -29,6 +29,7 @@ export default function ActivityButton({
   const [isPressed, setIsPressed] = useState(false);
   const pressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
 
   const startPress = () => {
     setIsPressed(true);
@@ -72,6 +73,8 @@ export default function ActivityButton({
         onMouseLeave={() => endPress(false)}
         onTouchStart={(e) => {
           e.preventDefault(); 
+          const touch = e.touches[0];
+          touchStartPos.current = { x: touch.clientX, y: touch.clientY };
           startPress();
         }}
         onTouchMove={(e) => {
@@ -81,6 +84,14 @@ export default function ActivityButton({
             return;
           }
 
+          if (touchStartPos.current) {
+            const dx = touch.clientX - touchStartPos.current.x;
+            const dy = touch.clientY - touchStartPos.current.y;
+            if (Math.abs(dx) > 15 || Math.abs(dy) > 15) {
+              endPress(false);
+            }
+          }
+
           const isInside = touch.clientX >= rect.left && touch.clientX <= rect.right && touch.clientY >= rect.top && touch.clientY <= rect.bottom;
           if (!isInside) {
             endPress(false);
@@ -88,9 +99,13 @@ export default function ActivityButton({
         }}
         onTouchEnd={(e) => {
           e.preventDefault();
+          touchStartPos.current = null;
           endPress(true);
         }}
-        onTouchCancel={() => endPress(false)}
+        onTouchCancel={() => {
+          touchStartPos.current = null;
+          endPress(false);
+        }}
         className={clsx(
           'relative h-[4.5rem] w-[4.5rem] md:h-24 md:w-24 rounded-2xl flex items-center justify-center transition-all duration-300',
           'shadow-lg hover:shadow-xl active:scale-95',

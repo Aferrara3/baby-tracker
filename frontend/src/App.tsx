@@ -482,6 +482,8 @@ export default function App() {
   const buttonsSaveRequestIdRef = useRef(0);
   const paletteSaveRequestIdRef = useRef(0);
   const toastIdRef = useRef(0);
+  const swipeStartX = useRef<number | null>(null);
+  const swipeStartY = useRef<number | null>(null);
   const dragSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -1400,6 +1402,33 @@ export default function App() {
       setIsBusy(false);
     }
   };
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    swipeStartX.current = e.touches[0].clientX;
+    swipeStartY.current = e.touches[0].clientY;
+  }, []);
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (swipeStartX.current === null || swipeStartY.current === null) {
+      return;
+    }
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+    
+    const deltaX = swipeStartX.current - touchEndX;
+    const deltaY = swipeStartY.current - touchEndY;
+    
+    if (Math.abs(deltaX) > 50 && Math.abs(deltaX) > Math.abs(deltaY) * 1.5) {
+      if (deltaX > 0) {
+        setTrackerPageIndex((current) => Math.min(current + 1, trackerPageCount - 1));
+      } else {
+        setTrackerPageIndex((current) => Math.max(current - 1, 0));
+      }
+    }
+    
+    swipeStartX.current = null;
+    swipeStartY.current = null;
+  }, [trackerPageCount]);
 
   useEffect(() => {
     document.documentElement.dataset.palette = settingsPalette;
@@ -2439,7 +2468,11 @@ export default function App() {
             </div>
           </section>
         ) : (
-          <section className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain pb-2">
+          <section
+            className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain pb-2"
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+          >
             <div className="shrink-0 space-y-2 text-center">
               <p className="app-muted text-sm font-medium">What's happening right now?</p>
 
