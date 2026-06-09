@@ -36,3 +36,6 @@ pnpm-debug.log*
 
 # Local Ollama state
 ollama/
+
+backend/custom-icon-assets-habit/
+backend/custom-icon-assets/

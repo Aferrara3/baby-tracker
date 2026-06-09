@@ -1,12 +1,16 @@
 import hashlib
 import json
 import logging
+import logging.config
+import logging.handlers
 import os
 import random
 import threading
+import time as time_module
 import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
+from starlette.middleware.base import BaseHTTPMiddleware
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal, Optional
@@ -14,7 +18,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import chat_service
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -49,11 +53,127 @@ from config import (
     DATABASE_URL,
     FORCE_GCAL_QUEUE_RETRY_TEST,
     FRONTEND_DIST_PATH,
+    LOG_DIR,
+    LOG_LEVEL_CONSOLE,
+    LOG_LEVEL_FILE,
     SESSION_TTL_DAYS,
 )
 
+from context import user_context
+
+def setup_logging() -> dict:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    class HostTimeFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            dt = datetime.fromtimestamp(record.created).astimezone()
+            return dt.isoformat(timespec='milliseconds')
+            
+    class UserContextFilter(logging.Filter):
+        def filter(self, record):
+            record.username = user_context.get()
+            return True
+            
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "user_context": {
+                "()": UserContextFilter,
+            }
+        },
+        "formatters": {
+            "custom": {
+                "()": HostTimeFormatter,
+                "format": "%(asctime)s %(levelname)-5s [u:%(username)s] %(message)s",
+            },
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "custom",
+                "filters": ["user_context"],
+                "level": LOG_LEVEL_CONSOLE,
+            },
+            "file": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": str(LOG_DIR / "app.log"),
+                "maxBytes": 10 * 1024 * 1024,
+                "backupCount": 5,
+                "formatter": "custom",
+                "filters": ["user_context"],
+                "level": LOG_LEVEL_FILE,
+                "encoding": "utf8"
+            },
+        },
+        "root": {
+            "level": "DEBUG",
+            "handlers": ["console", "file"],
+        },
+    }
+    logging.config.dictConfig(log_config)
+    return log_config
+
+LOG_CONFIG = setup_logging()
 logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
+
+class AccessLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time_module.perf_counter()
+        body = b""
+        
+        if request.method in ("POST", "PUT", "PATCH"):
+            try:
+                body = await request.body()
+                async def receive():
+                    return {"type": "http.request", "body": body}
+                request._receive = receive
+            except Exception:
+                pass
+        
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception:
+            status_code = 500
+            raise
+        finally:
+            process_time_ms = (time_module.perf_counter() - start_time) * 1000
+            username = getattr(request.state, "username", "-")
+            user_context.set(username)  # Ensure context is set before logging access
+            client_host = request.client.host if request.client else "-"
+            client_port = request.client.port if request.client else "-"
+            
+            import http
+            try:
+                phrase = http.HTTPStatus(status_code).phrase
+            except ValueError:
+                phrase = ""
+                
+            log_level = logging.DEBUG if request.method == "OPTIONS" else logging.INFO
+            
+            log_msg = (
+                f"{client_host}:{client_port} - "
+                f"\"{request.method} {request.url.path} HTTP/{request.scope.get('http_version', '1.1')}\" "
+                f"{status_code} {phrase} ({process_time_ms:.2f}ms)"
+            )
+            
+            logger.log(log_level, log_msg)
+            
+            if body and log_level == logging.INFO:
+                try:
+                    payload = json.loads(body)
+                    if payload and payload != {}:  # Only log non-empty payloads
+                        if isinstance(payload, dict) and "password" in payload:
+                            payload["password"] = "***"
+                        payload_str = json.dumps(payload)
+                        logger.debug(f"payload: {payload_str}")
+                except Exception:
+                    # Non-JSON or unparseable
+                    pass
+        
+        return response
 
 TRACKER_BUTTON_LABEL_MAX_LENGTH = 24
 DEFAULT_COLOR_PALETTE = "default"
@@ -398,6 +518,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AccessLogMiddleware)
 
 _calendar_service: Optional[CalendarService] = None
 _calendar_sync_worker_enabled = os.environ.get("DISABLE_CALENDAR_SYNC_WORKER") != "1"
@@ -1190,15 +1311,26 @@ def _adopt_legacy_events(session: Session, account: Account) -> None:
     session.commit()
 
 
-def require_session(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)) -> SessionContext:
+def require_session(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> SessionContext:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
     token_hash = _hash_token(credentials.credentials)
     with Session(engine) as session:
-        auth_session = session.exec(select(AuthSession).where(AuthSession.token_hash == token_hash)).first()
-        if not auth_session:
+        result = session.exec(
+            select(AuthSession, Account)
+            .where(AuthSession.token_hash == token_hash)
+            .join(Account, AuthSession.account_id == Account.id)
+        ).first()
+        
+        if not result:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+            
+        auth_session, account = result
+
         if _ensure_utc(auth_session.expires_at) < datetime.now(timezone.utc):
             session.delete(auth_session)
             session.commit()
@@ -1207,6 +1339,10 @@ def require_session(credentials: Optional[HTTPAuthorizationCredentials] = Securi
         auth_session.last_used_at = datetime.now(timezone.utc)
         session.add(auth_session)
         session.commit()
+        
+        request.state.username = account.username
+        user_context.set(account.username)
+        
         return SessionContext(account_id=auth_session.account_id, token_hash=token_hash)
 
 
@@ -1382,6 +1518,9 @@ def _process_calendar_sync_job(job_id: int) -> None:
                 return
 
             account = session.get(Account, job.account_id)
+            if account:
+                user_context.set(account.username)
+                
             event = session.get(Event, job.event_id) if job.event_id is not None else None
 
             if job.operation == "upsert":
@@ -2345,4 +2484,4 @@ def serve_frontend(full_path: str):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=APP_HOST, port=APP_PORT)
+    uvicorn.run(app, host=APP_HOST, port=APP_PORT, access_log=False, log_config=LOG_CONFIG)

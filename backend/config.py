@@ -34,6 +34,9 @@ def _parse_csv_env(name: str, default: str = "") -> list[str]:
 
 DEFAULT_DB_PATH = BACKEND_DIR / "database-dev.db"
 DB_PATH = Path(os.environ.get("DB_PATH", str(DEFAULT_DB_PATH))).expanduser()
+LOG_DIR = Path(os.environ.get("LOG_DIR", str(BACKEND_DIR / "logs"))).expanduser()
+LOG_LEVEL_CONSOLE = os.environ.get("LOG_LEVEL_CONSOLE", "INFO").upper()
+LOG_LEVEL_FILE = os.environ.get("LOG_LEVEL_FILE", "DEBUG").upper()
 APP_PROFILE_CONFIG_PATH = os.environ.get("APP_PROFILE_CONFIG_PATH", "app-profiles/baby-app-config.yaml")
 CUSTOM_ICON_STORAGE_DIR = Path(
     os.environ.get("CUSTOM_ICON_STORAGE_DIR", str(BACKEND_DIR / "custom-icon-assets"))

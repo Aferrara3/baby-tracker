@@ -228,7 +228,7 @@ class CalendarService:
         resolved_calendar_id = self._resolve_calendar_id(calendar_id)
         service = self._get_service()
         result = service.events().insert(calendarId=resolved_calendar_id, body=body).execute()
-        logger.info("Calendar event created: %s (%s)", result.get("summary"), result.get("id"))
+        logger.debug("Calendar event created: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
     def update_event(self, calendar_event_id: str, body: dict, calendar_id: Optional[str] = None) -> dict:
@@ -239,14 +239,14 @@ class CalendarService:
             .update(calendarId=resolved_calendar_id, eventId=calendar_event_id, body=body)
             .execute()
         )
-        logger.info("Calendar event updated: %s (%s)", result.get("summary"), result.get("id"))
+        logger.debug("Calendar event updated: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
     def delete_event(self, calendar_event_id: str, calendar_id: Optional[str] = None) -> None:
         resolved_calendar_id = self._resolve_calendar_id(calendar_id)
         service = self._get_service()
         service.events().delete(calendarId=resolved_calendar_id, eventId=calendar_event_id).execute()
-        logger.info("Calendar event deleted: %s from %s", calendar_event_id, resolved_calendar_id)
+        logger.debug("Calendar event deleted: %s from %s", calendar_event_id, resolved_calendar_id)
 
     def create_calendar(self, summary: str, description: Optional[str] = None, time_zone: str = CALENDAR_TIME_ZONE) -> dict:
         body = {"summary": summary, "timeZone": time_zone}
@@ -254,7 +254,7 @@ class CalendarService:
             body["description"] = description
         service = self._get_service()
         result = service.calendars().insert(body=body).execute()
-        logger.info("Calendar provisioned: %s (%s)", result.get("summary"), result.get("id"))
+        logger.debug("Calendar provisioned: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
     def update_calendar_metadata(
@@ -269,7 +269,7 @@ class CalendarService:
             body["description"] = description
         service = self._get_service()
         result = service.calendars().update(calendarId=calendar_id, body=body).execute()
-        logger.info("Calendar metadata updated: %s (%s)", result.get("summary"), result.get("id"))
+        logger.debug("Calendar metadata updated: %s (%s)", result.get("summary"), result.get("id"))
         return result
 
     def share_calendar(
@@ -293,7 +293,7 @@ class CalendarService:
             )
             .execute()
         )
-        logger.info("Calendar shared: %s -> %s", calendar_id, email)
+        logger.debug("Calendar shared: %s -> %s", calendar_id, email)
         return result
 
     def verify_calendar_access(self, calendar_id: Optional[str] = None) -> bool:
@@ -326,7 +326,7 @@ class CalendarService:
             except HttpError as exc:
                 status = getattr(exc.resp, "status", None)
                 if sync_token and status == 410:
-                    logger.info("Google sync token expired for %s; falling back to full sync", resolved_calendar_id)
+                    logger.debug("Google sync token expired for %s; falling back to full sync", resolved_calendar_id)
                     return self.list_event_changes(calendar_id=resolved_calendar_id, sync_token=None)
                 raise
 
